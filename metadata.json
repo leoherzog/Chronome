@@ -1,0 +1,8 @@
+{
+  "name": "Chronome",
+  "description": "Your agenda for the day",
+  "uuid": "chronome@herzog.tech",
+  "shell-version": [
+    "44"
+  ]
+}
