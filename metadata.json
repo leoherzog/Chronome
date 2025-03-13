@@ -1,8 +1,10 @@
 {
+  "uuid": "chronome@herzog.tech",
   "name": "Chronome",
   "description": "Your agenda for the day",
-  "uuid": "chronome@herzog.tech",
-  "shell-version": [
-    "44"
-  ]
+  "version": 1,
+  "shell-version": ["3.36", "40", "41", "42", "43", "44", "45"],
+  "url": "https://github.com/leoherzog/chronome",
+  "settings-schema": "org.gnome.shell.extensions.chronome",
+  "gettext-domain": "chronome"
 }

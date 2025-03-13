@@ -1,1 +1,30 @@
-/* Add your custom extension styling here */
+/* Chronome Extension Stylesheet */
+
+/* Past events */
+.chronome-past-event {
+  color: rgba(200, 200, 200, 0.7);
+}
+
+/* Current event */
+.chronome-current-event {
+  background-color: rgba(74, 144, 217, 0.1);
+  border-radius: 5px;
+}
+
+/* Declined events */
+.chronome-declined-event {
+  opacity: 0.7;
+}
+
+.chronome-strike-through {
+  text-decoration: line-through;
+}
+
+/* Tentative events */
+.chronome-tentative-event {
+  opacity: 0.8;
+}
+
+.chronome-italic {
+  font-style: italic;
+}
