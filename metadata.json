@@ -1,9 +1,9 @@
 {
-  "uuid": "chronome@herzog.tech",
   "name": "Chronome",
-  "description": "Your agenda for the day",
+  "description": "Show upcoming meetings on your calendar",
+  "uuid": "chronome@herzog.tech",
   "version": 1,
-  "shell-version": ["3.36", "40", "41", "42", "43", "44", "45"],
+  "shell-version": ["3.36", "40", "41", "42", "43", "44", "45", "46", "47", "48"],
   "url": "https://github.com/leoherzog/chronome",
   "settings-schema": "org.gnome.shell.extensions.chronome",
   "gettext-domain": "chronome"
