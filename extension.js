@@ -164,15 +164,28 @@ class ChronomeIndicator extends PanelMenu.Button {
     constructor(settings) {
         super(0.0, 'Chronome', false);
         this._settings = settings;
-        
-        // Create UI elements
+
+        // Create a box to hold icon and label
+        this._box = new St.BoxLayout({ style_class: 'panel-status-menu-box' });
+
+        // Create icon element
+        this._icon = new St.Icon({
+            style_class: 'system-status-icon',
+            y_align: Clutter.ActorAlign.CENTER
+        });
+
+        // Create label element
         this._label = new St.Label({
             text: _('Loading...'),
             y_align: Clutter.ActorAlign.CENTER
         });
-        
+
+        // Add icon and label to box
+        this._box.add_child(this._icon);
+        this._box.add_child(this._label);
+
         // Panel UI layout
-        this.add_child(this._label);
+        this.add_child(this._box);
         
         // Timer to fetch calendar data (less frequent)
         this._fetchTimeout = null;
@@ -196,6 +209,16 @@ class ChronomeIndicator extends PanelMenu.Button {
     updateLabel(text) {
         if (text) {
             this._label.set_text(text);
+        }
+    }
+
+    // Update the top bar icon
+    updateIcon(iconName) {
+        if (iconName) {
+            this._icon.set_icon_name(iconName);
+            this._icon.show();
+        } else {
+            this._icon.hide();
         }
     }
     
@@ -297,64 +320,101 @@ class ChronomeIndicator extends PanelMenu.Button {
         return GLib.SOURCE_CONTINUE;
     }
     
+    // Format label for a meeting that is currently happening
+    _formatCurrentMeeting(meeting) {
+        const titleText = this._getEventTitle(meeting);
+        const maxLength = this._settings.get_int('event-title-length');
+        const shortenedTitle = titleText.length > maxLength
+            ? titleText.substring(0, maxLength) + '…'
+            : titleText;
+
+        const endTime = this._getEventEnd(meeting);
+        const now = Date.now();
+        const remainingMs = endTime - now;
+        const remainingMin = Math.max(0, Math.ceil(remainingMs / 60000));
+
+        let remainingText;
+        if (remainingMin < 60) {
+            remainingText = remainingMin === 1 ? _('1 minute left') : `${remainingMin} ${_('minutes left')}`;
+        } else {
+            let remainingHrs = Math.floor(remainingMin / 60);
+            let extraMins = remainingMin % 60;
+            remainingText = remainingHrs === 1 ? _('1 hour left') : `${remainingHrs} ${_('hours left')}`;
+            if (extraMins > 0) {
+                remainingText += ` ${extraMins} ${_('min')}`;
+            }
+        }
+
+        const displayFormat = this._settings.get_string('display-format');
+        if (displayFormat === 'compact') {
+            return `${remainingText} ← ${shortenedTitle}`;
+        } else {
+            return `${remainingText} ${_('in')} ${shortenedTitle}`;
+        }
+    }
+
+    // Format label for an upcoming meeting
+    _formatUpcomingMeeting(meeting) {
+        const titleText = this._getEventTitle(meeting);
+        const maxLength = this._settings.get_int('event-title-length');
+        const shortenedTitle = titleText.length > maxLength
+            ? titleText.substring(0, maxLength) + '…'
+            : titleText;
+
+        const startTime = this._getEventStart(meeting);
+        const now = Date.now();
+        const diffMs = startTime - now;
+
+        // Check if this is still in the future
+        if (diffMs <= 0) {
+            return _('No upcoming meetings');
+        }
+
+        const displayFormat = this._settings.get_string('display-format');
+        let diffMin = Math.max(0, Math.floor(diffMs / 60000));
+        let display;
+
+        if (diffMin < 60) {
+            display = diffMin === 1 ? _('1 minute') : `${diffMin} ${_('minutes')}`;
+        } else {
+            let diffHrs = Math.floor(diffMin / 60);
+            let remainingMins = diffMin % 60;
+
+            if (displayFormat === 'compact') {
+                display = diffHrs === 1 ? _('1 hour') : `${diffHrs} ${_('hours')}`;
+            } else {
+                display = diffHrs === 1 ? _('1 hour') : `${diffHrs} ${_('hours')}`;
+                if (remainingMins > 0) {
+                    display += ` ${remainingMins} ${_('min')}`;
+                }
+            }
+        }
+
+        // Format depends on user setting
+        if (displayFormat === 'compact') {
+            return `${display} → ${shortenedTitle}`;
+        } else {
+            return `${display} ${_('until')} ${shortenedTitle}`;
+        }
+    }
+
     // Update panel label based on next meeting
     _updatePanelLabel(nextMeeting) {
         if (!nextMeeting) {
             this.updateLabel(_('No upcoming meetings'));
+            this.updateIcon(null); // Hide icon when no meeting
             return;
         }
-        
+
         try {
-            // Get meeting title 
-            const titleText = this._getEventTitle(nextMeeting);
-            
-            // Shorten title if needed
-            const maxLength = this._settings.get_int('event-title-length');
-            const shortenedTitle = titleText.length > maxLength 
-                ? titleText.substring(0, maxLength) + '…' 
-                : titleText;
-            
-            // Get start and end times
             const startTime = this._getEventStart(nextMeeting);
             const endTime = this._getEventEnd(nextMeeting);
-            
-            // Current time
             const now = Date.now();
-            
-            // Check if meeting is happening now
-            if (startTime <= now && endTime > now) {
-                // Meeting is happening now - show time remaining
-                const remainingMs = endTime - now;
-                const remainingMin = Math.max(0, Math.ceil(remainingMs / 60000));
-                
-                let remainingText;
-                if (remainingMin < 60) {
-                    remainingText = remainingMin === 1 ? _('1 minute left') : `${remainingMin} ${_('minutes left')}`;
-                } else {
-                    let remainingHrs = Math.floor(remainingMin / 60);
-                    let extraMins = remainingMin % 60;
-                    remainingText = remainingHrs === 1 ? _('1 hour left') : `${remainingHrs} ${_('hours left')}`;
-                    if (extraMins > 0) {
-                        remainingText += ` ${extraMins} ${_('min')}`;
-                    }
-                }
-                
-                const displayFormat = this._settings.get_string('display-format');
-                if (displayFormat === 'compact') {
-                    this.updateLabel(`${remainingText} ← ${shortenedTitle}`);
-                } else {
-                    this.updateLabel(`${remainingText} ${_('in')} ${shortenedTitle}`);
-                }
-                return;
-            }
-            
-            // Time difference in milliseconds for upcoming meeting
-            const diffMs = startTime - now;
-            
-            // Get icon based on event type and settings
+
+            // Determine icon based on settings
             const iconType = this._settings.get_string('status-bar-icon-type');
             let icon = null;
-            
+
             if (iconType === 'calendar') {
                 icon = 'x-office-calendar-symbolic';
             } else if (iconType === 'meeting-type') {
@@ -364,48 +424,97 @@ class ChronomeIndicator extends PanelMenu.Button {
                     icon = 'camera-video-symbolic';
                 }
             }
-            
-            // Display format based on settings
-            const displayFormat = this._settings.get_string('display-format');
-            let diffMin = Math.max(0, Math.floor(diffMs / 60000));
-            let display;
-            
-            if (diffMin < 60) {
-                display = diffMin === 1 ? _('1 minute') : `${diffMin} ${_('minutes')}`;
+            // If iconType is 'none', icon stays null
+
+            // Update icon
+            this.updateIcon(icon);
+
+            // Check if meeting is happening now
+            if (startTime <= now && endTime > now) {
+                this.updateLabel(this._formatCurrentMeeting(nextMeeting));
             } else {
-                let diffHrs = Math.floor(diffMin / 60);
-                let remainingMins = diffMin % 60;
-                
-                if (displayFormat === 'compact') {
-                    display = diffHrs === 1 ? _('1 hour') : `${diffHrs} ${_('hours')}`;
-                } else {
-                    display = diffHrs === 1 ? _('1 hour') : `${diffHrs} ${_('hours')}`;
-                    if (remainingMins > 0) {
-                        display += ` ${remainingMins} ${_('min')}`;
-                    }
-                }
+                this.updateLabel(this._formatUpcomingMeeting(nextMeeting));
             }
-            
-            // Check if this is still in the future
-            if (diffMs <= 0) {
-                // Event has passed, this shouldn't happen with proper filtering
-                this.updateLabel(_('No upcoming meetings'));
-                return;
-            }
-            
-            // Format depends on user setting
-            if (displayFormat === 'compact') {
-                this.updateLabel(`${display} → ${shortenedTitle}`);
-            } else {
-                this.updateLabel(`${display} ${_('until')} ${shortenedTitle}`);
-            }
-            
         } catch (e) {
             log(`Chronome: Error updating panel label: ${e}`);
             this.updateLabel(_('Meeting error'));
+            this.updateIcon(null);
         }
     }
     
+    // Create a menu item for an event
+    _createEventMenuItem(event, isPast, isCurrent) {
+        try {
+            const startTime = this._getEventStart(event);
+            const endTime = this._getEventEnd(event);
+            const showEndTime = this._settings.get_boolean('show-event-end-time');
+
+            // Get event details
+            const title = this._getEventTitle(event);
+            const timeRange = this._formatTimeRange(startTime, endTime, showEndTime);
+            const link = this._findVideoLink(event);
+
+            // Format menu item label
+            let itemLabel = `${title} — ${timeRange}`;
+
+            // Create menu item (with or without icon)
+            let menuItem;
+            if (link) {
+                // Create menu item with video icon and link indicator
+                const linkLabel = `${title} ↗ — ${timeRange}`;
+                menuItem = new PopupMenu.PopupImageMenuItem(
+                    linkLabel,
+                    'camera-video-symbolic'
+                );
+
+                // Add click handler for video meeting links
+                menuItem.connect('activate', () => {
+                    try {
+                        // NOTE: Meeting services configuration in settings is currently not used
+                        // All meeting links are opened with the default browser
+                        // TODO: Implement native app support based on meeting-services setting
+                        Gio.AppInfo.launch_default_for_uri(link, null);
+                    } catch (e) {
+                        log(`Chronome: Error launching URL: ${e}`);
+                    }
+                });
+            } else {
+                menuItem = new PopupMenu.PopupMenuItem(itemLabel);
+            }
+
+            // Add style classes based on event type
+            const isDeclined = this._isDeclinedEvent(event);
+            const isTentative = this._isTentativeEvent(event);
+
+            if (isPast) {
+                menuItem.add_style_class_name('chronome-past-event');
+                menuItem.setOrnament(PopupMenu.Ornament.NONE);
+            } else if (isCurrent) {
+                menuItem.add_style_class_name('chronome-current-event');
+                menuItem.setOrnament(PopupMenu.Ornament.DOT);
+            }
+
+            if (isDeclined) {
+                menuItem.add_style_class_name('chronome-declined-event');
+                if (menuItem.label) {
+                    menuItem.label.add_style_class_name('chronome-strike-through');
+                }
+            }
+
+            if (isTentative) {
+                menuItem.add_style_class_name('chronome-tentative-event');
+                if (menuItem.label) {
+                    menuItem.label.add_style_class_name('chronome-italic');
+                }
+            }
+
+            return menuItem;
+        } catch (e) {
+            log(`Chronome: Error creating menu item: ${e}`);
+            return null;
+        }
+    }
+
     // Update dropdown menu with today's events
     _updateMenu(todayEvents) {
         // Remove all existing menu items
@@ -441,14 +550,9 @@ class ChronomeIndicator extends PanelMenu.Button {
         
         // Current time for filtering
         const now = Date.now();
-        
-        // Sort events by start time
-        todayEvents.sort((a, b) => {
-            const aStart = this._getEventStart(a);
-            const bStart = this._getEventStart(b);
-            return aStart - bStart;
-        });
-        
+
+        // Events are already sorted by start time from _getTodayEvents()
+
         // Add menu items for each event
         for (const event of todayEvents) {
             try {
@@ -456,94 +560,40 @@ class ChronomeIndicator extends PanelMenu.Button {
                 const startTime = this._getEventStart(event);
                 const endTime = this._getEventEnd(event);
                 const isPast = endTime < now;
-                
+                const isCurrent = startTime <= now && endTime > now;
+
                 // Skip past events if not showing them
                 if (isPast && !showPastEvents) {
                     continue;
                 }
-                
+
                 // Get event properties for filtering
                 const isAllDay = this._isAllDayEvent(event);
                 const isDeclined = this._isDeclinedEvent(event);
                 const isTentative = this._isTentativeEvent(event);
-                
+
                 // Skip events based on type settings
                 if (isAllDay && !eventTypes.includes('all-day')) {
                     continue;
                 }
-                
+
                 if (!isAllDay && !eventTypes.includes('regular')) {
                     continue;
                 }
-                
+
                 if (isDeclined && !eventTypes.includes('declined')) {
                     continue;
                 }
-                
+
                 if (isTentative && !eventTypes.includes('tentative')) {
                     continue;
                 }
-                
-                // Get event details
-                const title = this._getEventTitle(event);
-                const timeRange = this._formatTimeRange(startTime, endTime, showEndTime);
-                const link = this._findVideoLink(event);
-                
-                // Format menu item label based on event type
-                let itemLabel = `${title} — ${timeRange}`;
-                
-                // Create menu item (with or without icon)
-                let menuItem;
-                if (link) {
-                    // Create menu item with video icon and link indicator
-                    const linkLabel = `${title} ↗ — ${timeRange}`;
-                    menuItem = new PopupMenu.PopupImageMenuItem(
-                        linkLabel, 
-                        'camera-video-symbolic'
-                    );
-                    
-                    // Add click handler for video meeting links
-                    menuItem.connect('activate', () => {
-                        try {
-                            // Check if we have a service configuration
-                            const servicesConfig = this._settings.get_value('meeting-services').deep_unpack();
-                            
-                            // Always use default browser for now
-                            // TODO: Add native app support when possible
-                            Gio.AppInfo.launch_default_for_uri(link, null);
-                        } catch (e) {
-                            log(`Chronome: Error launching URL: ${e}`);
-                        }
-                    });
-                } else {
-                    menuItem = new PopupMenu.PopupMenuItem(itemLabel);
+
+                // Create and add menu item
+                const menuItem = this._createEventMenuItem(event, isPast, isCurrent);
+                if (menuItem) {
+                    this.menu.addMenuItem(menuItem);
                 }
-                
-                // Add style classes based on event type
-                if (isPast) {
-                    menuItem.add_style_class_name('chronome-past-event');
-                    menuItem.setOrnament(PopupMenu.Ornament.NONE);
-                } else if (startTime <= now && endTime > now) {
-                    // Current event
-                    menuItem.add_style_class_name('chronome-current-event');
-                    menuItem.setOrnament(PopupMenu.Ornament.DOT);
-                }
-                
-                if (isDeclined) {
-                    menuItem.add_style_class_name('chronome-declined-event');
-                    if (menuItem.label) {
-                        menuItem.label.add_style_class_name('chronome-strike-through');
-                    }
-                }
-                
-                if (isTentative) {
-                    menuItem.add_style_class_name('chronome-tentative-event');
-                    if (menuItem.label) {
-                        menuItem.label.add_style_class_name('chronome-italic');
-                    }
-                }
-                
-                this.menu.addMenuItem(menuItem);
             } catch (e) {
                 log(`Chronome: Error adding menu item: ${e}`);
             }
@@ -595,6 +645,35 @@ class ChronomeIndicator extends PanelMenu.Button {
         }
     }
     
+    // Check if any attendee has a specific participation status
+    _hasAttendeeWithStatus(event, statusCode) {
+        try {
+            if (!event || typeof event.get_attendees !== 'function') {
+                return false;
+            }
+
+            const attendees = event.get_attendees();
+            if (!attendees || attendees.length === 0) {
+                return false;
+            }
+
+            // Look for any attendee with the specified participation status
+            for (const attendee of attendees) {
+                if (typeof attendee.get_partstat === 'function') {
+                    const partstat = attendee.get_partstat();
+                    if (partstat === statusCode) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        } catch (e) {
+            log(`Chronome: Error checking attendee status: ${e}`);
+            return false;
+        }
+    }
+
     // Check if an event is an all-day event
     _isAllDayEvent(event) {
         try {
@@ -631,30 +710,19 @@ class ChronomeIndicator extends PanelMenu.Button {
     _isDeclinedEvent(event) {
         try {
             if (!event) return false;
-            
+
             // Check participant status using ECal 2.0 API
-            if (typeof event.get_attendees === 'function') {
-                const attendees = event.get_attendees();
-                if (attendees && attendees.length > 0) {
-                    // Look for our own participation status
-                    for (const attendee of attendees) {
-                        if (typeof attendee.get_partstat === 'function') {
-                            const partstat = attendee.get_partstat();
-                            // ECal.ICalParticipationStatus.DECLINED
-                            if (partstat === 4) { // DECLINED
-                                return true;
-                            }
-                        }
-                    }
-                }
+            // ECal.ICalParticipationStatus.DECLINED = 4
+            if (this._hasAttendeeWithStatus(event, 4)) {
+                return true;
             }
-            
+
             // Alternative: check if the event summary contains declined indicators
             const title = this._getEventTitle(event).toLowerCase();
             if (title.includes('declined') || title.includes('rejected')) {
                 return true;
             }
-            
+
             return false;
         } catch (e) {
             log(`Chronome: Error checking declined event: ${e}`);
@@ -666,39 +734,28 @@ class ChronomeIndicator extends PanelMenu.Button {
     _isTentativeEvent(event) {
         try {
             if (!event) return false;
-            
+
             // Check participant status using ECal 2.0 API
-            if (typeof event.get_attendees === 'function') {
-                const attendees = event.get_attendees();
-                if (attendees && attendees.length > 0) {
-                    // Look for our own participation status
-                    for (const attendee of attendees) {
-                        if (typeof attendee.get_partstat === 'function') {
-                            const partstat = attendee.get_partstat();
-                            // ECal.ICalParticipationStatus.TENTATIVE
-                            if (partstat === 3) { // TENTATIVE
-                                return true;
-                            }
-                        }
-                    }
-                }
+            // ECal.ICalParticipationStatus.TENTATIVE = 3
+            if (this._hasAttendeeWithStatus(event, 3)) {
+                return true;
             }
-            
+
             // Alternative: check event status or transparency
             if (typeof event.get_status === 'function') {
                 const status = event.get_status();
-                // ECal.ICalComponentStatus.TENTATIVE
-                if (status === 2) { // TENTATIVE
+                // ECal.ICalComponentStatus.TENTATIVE = 2
+                if (status === 2) {
                     return true;
                 }
             }
-            
+
             // Check if the event summary contains tentative indicators
             const title = this._getEventTitle(event).toLowerCase();
             if (title.includes('tentative') || title.includes('maybe') || title.includes('?')) {
                 return true;
             }
-            
+
             return false;
         } catch (e) {
             log(`Chronome: Error checking tentative event: ${e}`);
@@ -706,6 +763,37 @@ class ChronomeIndicator extends PanelMenu.Button {
         }
     }
     
+    // Extract timestamp from a datetime object, handling different API versions
+    _extractTimestamp(dateTimeObj) {
+        try {
+            if (!dateTimeObj) return null;
+
+            // Handle if dateTimeObj is an object with get_value()
+            if (typeof dateTimeObj.get_value === 'function') {
+                const dtValue = dateTimeObj.get_value();
+                if (dtValue) {
+                    if (typeof dtValue.as_timet === 'function') {
+                        return dtValue.as_timet() * 1000; // Convert seconds to ms
+                    } else if (typeof dtValue.get_time === 'function') {
+                        return dtValue.get_time();
+                    }
+                }
+            }
+
+            // Handle if dateTimeObj has the time directly
+            if (typeof dateTimeObj.as_timet === 'function') {
+                return dateTimeObj.as_timet() * 1000; // Convert seconds to ms
+            } else if (typeof dateTimeObj.get_time === 'function') {
+                return dateTimeObj.get_time();
+            }
+
+            return null;
+        } catch (e) {
+            log(`Chronome: Error extracting timestamp: ${e}`);
+            return null;
+        }
+    }
+
     // Extract event title, handling different API versions
     _getEventTitle(event) {
         try {
@@ -745,32 +833,16 @@ class ChronomeIndicator extends PanelMenu.Button {
     _getEventStart(event) {
         try {
             if (!event) return 0;
-            
+
             // Get start time using ECal 2.0 API
             if (typeof event.get_dtstart === 'function') {
                 const dtStart = event.get_dtstart();
-                if (dtStart) {
-                    // Handle if dtStart is an object with get_value()
-                    if (typeof dtStart.get_value === 'function') {
-                        const dtValue = dtStart.get_value();
-                        // Different time object representations
-                        if (dtValue) {
-                            if (typeof dtValue.as_timet === 'function') {
-                                return dtValue.as_timet() * 1000; // Convert seconds to ms
-                            } else if (typeof dtValue.get_time === 'function') {
-                                return dtValue.get_time();
-                            }
-                        }
-                    }
-                    // Handle if dtStart has the time directly
-                    if (typeof dtStart.as_timet === 'function') {
-                        return dtStart.as_timet() * 1000; // Convert seconds to ms
-                    } else if (typeof dtStart.get_time === 'function') {
-                        return dtStart.get_time();
-                    }
+                const timestamp = this._extractTimestamp(dtStart);
+                if (timestamp) {
+                    return timestamp;
                 }
             }
-            
+
             // Fallback to current time if we can't parse the start time
             return Date.now();
         } catch (e) {
@@ -783,31 +855,16 @@ class ChronomeIndicator extends PanelMenu.Button {
     _getEventEnd(event) {
         try {
             if (!event) return 0;
-            
+
             // Get end time using ECal 2.0 API
             if (typeof event.get_dtend === 'function') {
                 const dtEnd = event.get_dtend();
-                if (dtEnd) {
-                    // Handle if dtEnd is an object with get_value()
-                    if (typeof dtEnd.get_value === 'function') {
-                        const dtValue = dtEnd.get_value();
-                        if (dtValue) {
-                            if (typeof dtValue.as_timet === 'function') {
-                                return dtValue.as_timet() * 1000;
-                            } else if (typeof dtValue.get_time === 'function') {
-                                return dtValue.get_time();
-                            }
-                        }
-                    }
-                    // Handle if dtEnd has the time directly
-                    if (typeof dtEnd.as_timet === 'function') {
-                        return dtEnd.as_timet() * 1000;
-                    } else if (typeof dtEnd.get_time === 'function') {
-                        return dtEnd.get_time();
-                    }
+                const timestamp = this._extractTimestamp(dtEnd);
+                if (timestamp) {
+                    return timestamp;
                 }
             }
-            
+
             // If no end time, use start time + 1 hour as fallback
             return this._getEventStart(event) + 3600000;
         } catch (e) {
@@ -960,35 +1017,35 @@ class ChronomeIndicator extends PanelMenu.Button {
         return events;
     }
     
-    // Filter events to just those occurring today
+    // Filter events to just those occurring today and sort by start time
     _getTodayEvents(allEvents) {
         const todayEvents = [];
-        
+
         try {
             if (!allEvents || !Array.isArray(allEvents)) {
                 return todayEvents;
             }
-            
+
             // Get range for "today"
             const now = new Date();
             const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
             const tomorrowStart = new Date(todayStart);
             tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-            
+
             // Convert to timestamps for comparison
             const todayStartTs = todayStart.getTime();
             const tomorrowStartTs = tomorrowStart.getTime();
-            
+
             // Filter events
             for (const event of allEvents) {
                 try {
                     // Get start and end times
                     const startTs = this._getEventStart(event);
                     const endTs = this._getEventEnd(event);
-                    
+
                     // Skip events without valid times
                     if (!startTs) continue;
-                    
+
                     // Include event if:
                     // 1. It starts before tomorrow AND
                     // 2. It ends on or after the start of today
@@ -999,10 +1056,15 @@ class ChronomeIndicator extends PanelMenu.Button {
                     log(`Chronome: Error processing event for today filter: ${e}`);
                 }
             }
+
+            // Sort events by start time once (used by both menu and next meeting)
+            todayEvents.sort((a, b) => {
+                return this._getEventStart(a) - this._getEventStart(b);
+            });
         } catch (e) {
             log(`Chronome: Error filtering today's events: ${e}`);
         }
-        
+
         return todayEvents;
     }
     
@@ -1053,12 +1115,8 @@ class ChronomeIndicator extends PanelMenu.Button {
             if (upcomingEvents.length === 0) {
                 return null;
             }
-            
-            // Sort by start time (earliest first)
-            upcomingEvents.sort((a, b) => {
-                return this._getEventStart(a) - this._getEventStart(b);
-            });
-            
+
+            // Events are already sorted by start time, so just return the first one
             return upcomingEvents[0];
         } catch (e) {
             log(`Chronome: Error getting next meeting: ${e}`);
@@ -1070,60 +1128,64 @@ class ChronomeIndicator extends PanelMenu.Button {
     _findVideoLink(event) {
         try {
             if (!event) return null;
-            
-            // Texts to search in
-            let searchTexts = [];
-            
-            // Try to get location
+
+            // Helper function to search text for meeting URL
+            const searchForLink = (text) => {
+                if (!text) return null;
+                for (const pattern of MEETING_URL_PATTERNS) {
+                    const match = text.match(pattern);
+                    if (match && match[0]) {
+                        return match[0];
+                    }
+                }
+                return null;
+            };
+
+            // Try location first (most common location for meeting links)
             try {
                 if (typeof event.get_location === 'function') {
                     const loc = event.get_location();
                     if (loc) {
-                        // Handle if location is an object with get_value()
-                        if (typeof loc.get_value === 'function') {
-                            searchTexts.push(loc.get_value() || '');
-                        } else if (typeof loc === 'string') {
-                            searchTexts.push(loc);
-                        }
+                        const locationText = typeof loc.get_value === 'function'
+                            ? loc.get_value()
+                            : (typeof loc === 'string' ? loc : '');
+
+                        const link = searchForLink(locationText);
+                        if (link) return link;
                     }
                 }
             } catch (e) {
                 log(`Chronome: Error getting location: ${e}`);
             }
-            
-            // Try to get description
+
+            // Try description next
             try {
                 if (typeof event.get_description === 'function') {
                     const desc = event.get_description();
                     if (desc) {
-                        // Handle if description is an object with get_value()
-                        if (typeof desc.get_value === 'function') {
-                            searchTexts.push(desc.get_value() || '');
-                        } else if (typeof desc === 'string') {
-                            searchTexts.push(desc);
-                        }
+                        const descText = typeof desc.get_value === 'function'
+                            ? desc.get_value()
+                            : (typeof desc === 'string' ? desc : '');
+
+                        const link = searchForLink(descText);
+                        if (link) return link;
                     }
                 }
             } catch (e) {
                 log(`Chronome: Error getting description: ${e}`);
             }
-            
-            // If we couldn't get anything specific, try the full event string
-            if (searchTexts.length === 0 && typeof event.get_as_string === 'function') {
-                searchTexts.push(event.get_as_string() || '');
-            }
-            
-            // Combine all texts for searching
-            const fullText = searchTexts.join(' ');
-            
-            // Check each regex pattern
-            for (const pattern of MEETING_URL_PATTERNS) {
-                const match = fullText.match(pattern);
-                if (match && match[0]) {
-                    return match[0];
+
+            // Last resort: search full event string
+            try {
+                if (typeof event.get_as_string === 'function') {
+                    const fullString = event.get_as_string();
+                    const link = searchForLink(fullString);
+                    if (link) return link;
                 }
+            } catch (e) {
+                log(`Chronome: Error getting event string: ${e}`);
             }
-            
+
             return null;
         } catch (e) {
             log(`Chronome: Error finding video link: ${e}`);

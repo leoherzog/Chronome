@@ -32,10 +32,3 @@ function getSettings() {
     return new Gio.Settings({ settings_schema: schemaObj });
 }
 
-/**
- * Log a message with the extension name prefix
- * @param {string} msg The message to log
- */
-function log(msg) {
-    global.log(`[Chronome] ${msg}`);
-}

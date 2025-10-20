@@ -209,6 +209,21 @@ function buildGeneralTab(settings) {
     return page;
 }
 
+// Helper function to create event type toggle handler
+function createEventTypeToggleHandler(checkbox, typeName, settings) {
+    checkbox.connect('toggled', () => {
+        let types = settings.get_strv('event-types');
+        if (checkbox.get_active()) {
+            if (!types.includes(typeName)) {
+                types.push(typeName);
+            }
+        } else {
+            types = types.filter(type => type !== typeName);
+        }
+        settings.set_strv('event-types', types);
+    });
+}
+
 // Build the Appearance tab
 function buildAppearanceTab(settings) {
     const page = new Gtk.Grid({
@@ -391,53 +406,10 @@ function buildAppearanceTab(settings) {
     }
     
     // Connect signals to update the event-types setting
-    allDayCheck.connect('toggled', () => {
-        let types = settings.get_strv('event-types');
-        if (allDayCheck.get_active()) {
-            if (!types.includes('all-day')) {
-                types.push('all-day');
-            }
-        } else {
-            types = types.filter(type => type !== 'all-day');
-        }
-        settings.set_strv('event-types', types);
-    });
-    
-    regularCheck.connect('toggled', () => {
-        let types = settings.get_strv('event-types');
-        if (regularCheck.get_active()) {
-            if (!types.includes('regular')) {
-                types.push('regular');
-            }
-        } else {
-            types = types.filter(type => type !== 'regular');
-        }
-        settings.set_strv('event-types', types);
-    });
-    
-    declinedCheck.connect('toggled', () => {
-        let types = settings.get_strv('event-types');
-        if (declinedCheck.get_active()) {
-            if (!types.includes('declined')) {
-                types.push('declined');
-            }
-        } else {
-            types = types.filter(type => type !== 'declined');
-        }
-        settings.set_strv('event-types', types);
-    });
-    
-    tentativeCheck.connect('toggled', () => {
-        let types = settings.get_strv('event-types');
-        if (tentativeCheck.get_active()) {
-            if (!types.includes('tentative')) {
-                types.push('tentative');
-            }
-        } else {
-            types = types.filter(type => type !== 'tentative');
-        }
-        settings.set_strv('event-types', types);
-    });
+    createEventTypeToggleHandler(allDayCheck, 'all-day', settings);
+    createEventTypeToggleHandler(regularCheck, 'regular', settings);
+    createEventTypeToggleHandler(declinedCheck, 'declined', settings);
+    createEventTypeToggleHandler(tentativeCheck, 'tentative', settings);
     
     page.attach(eventTypesFrame, 0, row, 2, 1);
     
@@ -601,6 +573,16 @@ function buildServicesTab(settings) {
         wrap: true
     });
     page.attach(serviceHelpLabel, 0, row, 2, 1);
+    row++;
+
+    // Note about current limitation
+    const noteLabel = new Gtk.Label({
+        label: '<i>' + _('Note: Native application support is not yet implemented. All links currently open in the default browser.') + '</i>',
+        halign: Gtk.Align.START,
+        use_markup: true,
+        wrap: true
+    });
+    page.attach(noteLabel, 0, row, 2, 1);
     row++;
     
     // Get current services configuration
