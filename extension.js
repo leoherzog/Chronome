@@ -21,6 +21,11 @@ import {findMeetingUrl} from './meetingServices.js';
 // Calendar utilities (shared with prefs.js)
 import {getAccountEmailForSource, getCalendarIdForSource, getCalendarColor, deduplicateSources} from './calendarUtils.js';
 
+// Pure utility modules (testable with gjs -m)
+import {formatDuration, formatTime, formatTimeRange, truncateText} from './lib/formatting.js';
+import {parseIcalDateTime, extractIcalDateString} from './lib/icalParser.js';
+import {hasRecurrenceId, getEventDedupeKey, deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHeuristic} from './lib/eventUtils.js';
+
 // Constants
 const CONSTANTS = {
     ONE_HOUR_MS: 3600000,
@@ -342,9 +347,7 @@ const ChronomeIndicator = GObject.registerClass({
 
             // Shorten title if needed
             const maxLength = this._settings.get_int('event-title-length');
-            const shortenedTitle = titleText.length > maxLength
-                ? titleText.substring(0, maxLength) + '…'
-                : titleText;
+            const shortenedTitle = truncateText(titleText, maxLength);
 
             // Get start and end times
             const startTime = this._getEventStart(nextMeeting);
@@ -572,63 +575,23 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     // Format a time range for display (e.g., "9:30 AM - 10:30 AM")
+    // Delegates to pure function from lib/formatting.js
     _formatTimeRange(startTs, endTs, showEndTime = true) {
-        try {
-            if (!startTs) return '';
-
-            const startDate = new Date(startTs);
-            const endDate = new Date(endTs || startTs);
-
-            // Format times using our helper
-            const startTime = this._formatTime(startDate);
-
-            if (showEndTime && endTs) {
-                const endTime = this._formatTime(endDate);
-                return `${startTime} – ${endTime}`;
-            } else {
-                return startTime;
-            }
-        } catch (e) {
-            return '';
-        }
+        const use24Hour = this._settings.get_string('time-format') === '24h';
+        return formatTimeRange(startTs, endTs, showEndTime, use24Hour);
     }
 
     // Format a single time according to settings
+    // Delegates to pure function from lib/formatting.js
     _formatTime(date) {
-        const hours = date.getHours();
-        const minutes = date.getMinutes();
         const use24Hour = this._settings.get_string('time-format') === '24h';
-
-        if (use24Hour) {
-            // 24-hour format: "13:30"
-            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-        } else {
-            // 12-hour format: "1:30 PM"
-            const period = hours >= 12 ? 'PM' : 'AM';
-            const displayHours = hours % 12 || 12;
-            return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`;
-        }
+        return formatTime(date, use24Hour);
     }
 
     // Format a duration in milliseconds as human-readable text
+    // Delegates to pure function from lib/formatting.js
     _formatDuration(ms) {
-        if (ms < CONSTANTS.ONE_MINUTE_MS) {
-            const sec = Math.max(0, Math.floor(ms / 1000));
-            return sec === 1 ? _('1 second') : `${sec} ${_('seconds')}`;
-        }
-
-        const min = Math.floor(ms / CONSTANTS.ONE_MINUTE_MS);
-        if (min < 60) {
-            return min === 1 ? _('1 minute') : `${min} ${_('minutes')}`;
-        }
-
-        const hrs = Math.floor(min / 60);
-        const extraMin = min % 60;
-        let text = hrs === 1 ? _('1 hour') : `${hrs} ${_('hours')}`;
-        if (extraMin > 0) {
-            text += ` ${extraMin} ${_('min')}`;
-        }
-        return text;
+        return formatDuration(ms, _);
     }
 
     // Check if an event is an all-day event
@@ -661,23 +624,10 @@ const ChronomeIndicator = GObject.registerClass({
             }
 
             // Fallback heuristic: check if starts at midnight and duration is multiple of 24h
+            // Delegates to pure function from lib/eventUtils.js
             const startTime = this._getEventStart(event);
             const endTime = this._getEventEnd(event);
-
-            if (!startTime || !endTime) return false;
-
-            const startDate = new Date(startTime);
-
-            // Check if start time is at midnight (local time)
-            const isMidnight = startDate.getHours() === 0 &&
-                              startDate.getMinutes() === 0 &&
-                              startDate.getSeconds() === 0;
-
-            // Check if duration is a multiple of 24 hours
-            const durationHours = (endTime - startTime) / CONSTANTS.ONE_HOUR_MS;
-            const isDivisibleBy24 = Math.abs(durationHours % 24) < 0.001;
-
-            return isMidnight && isDivisibleBy24 && durationHours >= 24;
+            return isAllDayEventHeuristic(startTime, endTime);
         } catch (e) {
             return false;
         }
@@ -859,55 +809,9 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     // Parse an iCal property date/time from a raw iCal string
+    // Delegates to pure function from lib/icalParser.js
     _parseIcalDateTime(icalStr, propName) {
-        if (!icalStr || !propName) return null;
-
-        // Match lines like:
-        // DTSTART;TZID=America/New_York:20250101T093000
-        // DTSTART:20250101T093000Z
-        // DTSTART;VALUE=DATE:20250101
-        const re = new RegExp(`^${propName}([^:]*)?:(\\d{8}(?:T\\d{6})?)(Z)?`, 'mi');
-        const match = icalStr.match(re);
-        if (!match) return null;
-
-        const params = match[1] || '';
-        const value = match[2];
-        const isUtc = !!match[3];
-
-        const tzidMatch = params.match(/TZID=([^;:]+)/i);
-        const tzid = tzidMatch ? tzidMatch[1] : null;
-
-        const isDateOnly = value.length === 8;
-
-        const year = Number.parseInt(value.slice(0, 4), 10);
-        const month = Number.parseInt(value.slice(4, 6), 10);
-        const day = Number.parseInt(value.slice(6, 8), 10);
-
-        let hour = 0;
-        let minute = 0;
-        let second = 0;
-        if (!isDateOnly) {
-            hour = Number.parseInt(value.slice(9, 11), 10);
-            minute = Number.parseInt(value.slice(11, 13), 10);
-            second = Number.parseInt(value.slice(13, 15), 10);
-        }
-
-        let tz = null;
-        if (isUtc) {
-            tz = GLib.TimeZone.new_utc();
-        } else if (tzid) {
-            tz = GLib.TimeZone.new(tzid);
-        } else {
-            tz = GLib.TimeZone.new_local();
-        }
-
-        const dateTime = GLib.DateTime.new(tz, year, month, day, hour, minute, second);
-        if (!dateTime) return null;
-
-        return {
-            timestampMs: dateTime.to_unix() * 1000,
-            isDateOnly,
-        };
+        return parseIcalDateTime(icalStr, propName);
     }
 
     // Get event start time as timestamp
@@ -1160,17 +1064,14 @@ const ChronomeIndicator = GObject.registerClass({
                                 const icalStr = comp.get_as_string ? comp.get_as_string() : '';
 
                                 // Check if this is a detached instance (has RECURRENCE-ID)
-                                const recurIdMatch = icalStr.match(/RECURRENCE-ID[^:]*:(\d{8})/);
-                                if (!recurIdMatch) continue;
-
-                                const recurIdDateStr = recurIdMatch[1];
+                                const recurIdDateStr = extractIcalDateString(icalStr, 'RECURRENCE-ID');
+                                if (!recurIdDateStr) continue;
 
                                 // Only care about instances with RECURRENCE-ID matching today
                                 if (recurIdDateStr !== todayDateStr) continue;
 
                                 // Get the stored DTSTART
-                                const dtstartMatch = icalStr.match(/DTSTART[^:]*:(\d{8})/);
-                                const storedDtstartDateStr = dtstartMatch ? dtstartMatch[1] : null;
+                                const storedDtstartDateStr = extractIcalDateString(icalStr, 'DTSTART');
 
                                 // Get UID
                                 const uid = comp.get_uid ? comp.get_uid() : '';
@@ -1424,145 +1325,35 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     // Check if an event has a RECURRENCE-ID (is an exception to a recurring event)
+    // Delegates to pure function from lib/eventUtils.js
     _hasRecurrenceId(event) {
-        try {
-            if (!event) return false;
-            const recurid = event.get_recurid_as_string?.();
-            return recurid !== null && recurid !== '';
-        } catch (e) {
-            return false;
-        }
+        return hasRecurrenceId(event);
     }
 
     // Get a unique deduplication key for an event (UID + start time)
+    // Delegates to pure function from lib/eventUtils.js
     _getEventDedupeKey(event) {
-        try {
-            let uid = '';
-            // Get UID
-            if (typeof event.get_uid === 'function') {
-                uid = event.get_uid() || '';
-            }
-            // Prefer recurrence-id time for detached instances to avoid duplicates
-            const startTs = event._recurrenceIdStart || this._getEventStart(event);
-            // Combine UID and start time to create a unique key for this occurrence
-            return `${uid}:${startTs}`;
-        } catch (e) {
-            // Fallback to random key (won't dedupe)
-            return Math.random().toString();
-        }
+        return getEventDedupeKey(event, this._getEventStart.bind(this));
     }
 
     // Deduplicate events - prefers exceptions over master occurrences
-    // When EDS returns both a master recurring event and an exception for the
-    // same occurrence, prefer the exception (has RECURRENCE-ID) as it contains
-    // instance-specific modifications like updated location or attendee responses.
+    // Delegates to pure function from lib/eventUtils.js
     _deduplicateEvents(events) {
-        if (!events?.length) return [];
-
-        const eventMap = new Map();
-
-        for (const event of events) {
-            try {
-                // Skip events without valid start times
-                if (!this._getEventStart(event)) continue;
-
-                const key = this._getEventDedupeKey(event);
-                const existing = eventMap.get(key);
-
-                if (!existing) {
-                    eventMap.set(key, event);
-                } else {
-                    // Prefer events with RECURRENCE-ID (exceptions) over master
-                    const existingHasRecurId = this._hasRecurrenceId(existing);
-                    const newHasRecurId = this._hasRecurrenceId(event);
-
-                    if (newHasRecurId && !existingHasRecurId) {
-                        eventMap.set(key, event);
-                    }
-                }
-            } catch (e) {
-                console.debug(`Chronome: Error deduplicating event: ${e.message}`);
-            }
-        }
-
-        return Array.from(eventMap.values());
+        return deduplicateEvents(events, this._getEventStart.bind(this));
     }
 
     // Get the next upcoming meeting
+    // Delegates to pure function from lib/eventUtils.js
     _getNextMeeting(events) {
-        try {
-            if (!events || !Array.isArray(events) || events.length === 0) {
-                return null;
-            }
-
-            const now = Date.now();
-            const eventTypes = this._settings.get_strv('event-types');
-
-            // Filter out events that shouldn't appear in the panel countdown
-            const relevantEvents = events.filter(evt => {
-                // Skip all-day events - they shouldn't show in countdown
-                if (this._isAllDayEvent(evt)) {
-                    return false;
-                }
-
-                // Skip regular events if disabled
-                if (!eventTypes.includes('regular')) {
-                    return false;
-                }
-                // Skip declined events unless specifically enabled
-                if (this._isDeclinedEvent(evt)) {
-                    if (!eventTypes.includes('declined')) {
-                        return false;
-                    }
-                }
-                // Skip tentative events unless specifically enabled
-                if (this._isTentativeEvent(evt)) {
-                    if (!eventTypes.includes('tentative')) {
-                        return false;
-                    }
-                }
-                return true;
-            });
-
-            // First check for currently ongoing meetings if enabled in settings
-            // Use a 5-minute rolling window: once a meeting has less than 5 minutes left,
-            // we switch to showing the next upcoming meeting instead
-            if (this._settings.get_boolean('show-current-meeting')) {
-                const fiveMinutesFromNow = now + CONSTANTS.FIVE_MINUTES_MS;
-                const currentEvents = relevantEvents.filter(evt => {
-                    const start = this._getEventStart(evt);
-                    const end = this._getEventEnd(evt);
-                    return start <= now && end > fiveMinutesFromNow;
-                });
-
-                if (currentEvents.length > 0) {
-                    // Sort by end time (to show the one ending soonest)
-                    currentEvents.sort((a, b) => {
-                        return this._getEventEnd(a) - this._getEventEnd(b);
-                    });
-                    return currentEvents[0];
-                }
-            }
-
-            // Find upcoming events
-            const upcomingEvents = relevantEvents.filter(evt => {
-                const start = this._getEventStart(evt);
-                return start > now;
-            });
-
-            if (upcomingEvents.length === 0) {
-                return null;
-            }
-
-            // Sort by start time (earliest first)
-            upcomingEvents.sort((a, b) => {
-                return this._getEventStart(a) - this._getEventStart(b);
-            });
-
-            return upcomingEvents[0];
-        } catch (e) {
-            return null;
-        }
+        return getNextMeetingPure(events, {
+            getEventStart: this._getEventStart.bind(this),
+            getEventEnd: this._getEventEnd.bind(this),
+            isAllDayEvent: this._isAllDayEvent.bind(this),
+            isDeclinedEvent: this._isDeclinedEvent.bind(this),
+            isTentativeEvent: this._isTentativeEvent.bind(this),
+            eventTypes: this._settings.get_strv('event-types'),
+            showCurrentMeeting: this._settings.get_boolean('show-current-meeting'),
+        });
     }
 
     // Find a video conferencing link in an event
