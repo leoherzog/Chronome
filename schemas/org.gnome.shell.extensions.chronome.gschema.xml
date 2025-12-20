@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.chronome" path="/org/gnome/shell/extensions/chronome/">
+    <key name="refresh-interval" type="i">
+      <default>60</default>
+      <range min="30" max="300"/>
+      <summary>Refresh interval in seconds</summary>
+      <description>How often to refresh the calendar data, in seconds</description>
+    </key>
+
+    <key name="real-time-countdown" type="b">
+      <default>true</default>
+      <summary>Real-time countdown updates</summary>
+      <description>Whether to update the countdown every second</description>
+    </key>
+
+    <key name="time-format" type="s">
+      <default>'12h'</default>
+      <choices>
+        <choice value="12h"/>
+        <choice value="24h"/>
+      </choices>
+      <summary>Time format</summary>
+      <description>Format for displaying times (12h or 24h)</description>
+    </key>
+
+    <key name="event-title-length" type="i">
+      <default>30</default>
+      <summary>Maximum event title length</summary>
+      <description>Maximum length of event titles in the panel display</description>
+    </key>
+
+    <key name="event-types" type="as">
+      <default>['all-day', 'regular', 'declined', 'tentative']</default>
+      <summary>Types of events to show</summary>
+      <description>Which types of events should be displayed</description>
+    </key>
+
+    <key name="show-past-events" type="b">
+      <default>false</default>
+      <summary>Show past events</summary>
+      <description>Whether to show events that have already ended</description>
+    </key>
+
+    <key name="show-event-end-time" type="b">
+      <default>true</default>
+      <summary>Show event end time</summary>
+      <description>Whether to show the end time of events in the dropdown menu</description>
+    </key>
+
+    <key name="status-bar-icon-type" type="s">
+      <default>'calendar'</default>
+      <choices>
+        <choice value="calendar"/>
+        <choice value="meeting-type"/>
+        <choice value="none"/>
+      </choices>
+      <summary>Status bar icon type</summary>
+      <description>Type of icon to display next to the event summary when there is an upcoming meeting (calendar, meeting-type, none). A calendar icon is always shown when there are no events.</description>
+    </key>
+
+    <key name="show-current-meeting" type="b">
+      <default>true</default>
+      <summary>Show current meeting</summary>
+      <description>Whether to show the ongoing meeting instead of the next one</description>
+    </key>
+
+    <key name="enabled-calendars" type="as">
+      <default>[]</default>
+      <summary>Enabled calendars</summary>
+      <description>List of calendar source UIDs to show (empty means show all)</description>
+    </key>
+
+    <key name="use-calendar-colors" type="b">
+      <default>false</default>
+      <summary>Use calendar colors</summary>
+      <description>Show a colored left border on events based on their source calendar's color</description>
+    </key>
+  </schema>
+</schemalist>

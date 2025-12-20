@@ -1,0 +1,7 @@
+/* Chronome Extension Stylesheet */
+
+/* Current event - highlight with subtle background */
+.chronome-current-event {
+    background-color: rgba(74, 144, 217, 0.1);
+    border-radius: 5px;
+}
