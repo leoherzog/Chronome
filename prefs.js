@@ -264,6 +264,11 @@ export default class ChronomePreferences extends ExtensionPreferences {
         // Load registry asynchronously
         EDataServer.SourceRegistry.new(null, (obj, res) => {
             try {
+                // Check if prefs window was closed before callback fired
+                if (!calendarsGroup.get_parent()) {
+                    return;
+                }
+
                 // Remove loading indicator
                 calendarsGroup.remove(loadingRow);
 

@@ -22,15 +22,16 @@ import {findMeetingUrl} from './meetingServices.js';
 import {getAccountEmailForSource, getCalendarIdForSource, getCalendarColor, deduplicateSources} from './calendarUtils.js';
 
 // Pure utility modules (testable with gjs -m)
-import {formatDuration, formatTime, formatTimeRange, truncateText} from './lib/formatting.js';
+import {formatDuration, formatTimeRange, truncateText} from './lib/formatting.js';
 import {parseIcalDateTime, extractIcalDateString} from './lib/icalParser.js';
-import {hasRecurrenceId, getEventDedupeKey, deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHeuristic} from './lib/eventUtils.js';
+import {deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHeuristic} from './lib/eventUtils.js';
+import {ONE_HOUR_MS, ONE_MINUTE_MS, FIVE_MINUTES_MS} from './lib/constants.js';
 
 // Constants
 const CONSTANTS = {
-    ONE_HOUR_MS: 3600000,
-    ONE_MINUTE_MS: 60000,
-    FIVE_MINUTES_MS: 5 * 60 * 1000,
+    ONE_HOUR_MS,
+    ONE_MINUTE_MS,
+    FIVE_MINUTES_MS,
     DEBOUNCE_MS: 500,
     CLIENT_CONNECT_TIMEOUT_SEC: 10,
     SYNC_DELAY_MS: 50,
@@ -89,8 +90,9 @@ const ChronomeIndicator = GObject.registerClass({
         this._pendingRefresh = false;
         this._refreshDebounceId = null;
 
-        // Cache for rescheduled instances: sourceUid -> Map<"UID:YYYYMMDD", "YYYYMMDD">
-        // This avoids querying ALL events on every refresh
+        // Cache for rescheduled instances: sourceUid -> { rescheduledFromToday: Map, movedToToday: Array }
+        // rescheduledFromToday: events originally on today but moved elsewhere (skip these)
+        // movedToToday: events moved TO today from another date (add these manually)
         this._rescheduledCache = new Map();
         this._cacheDate = null; // Track which date the cache is for
 
@@ -241,6 +243,8 @@ const ChronomeIndicator = GObject.registerClass({
                 // Try to refresh without checking support first (async)
                 // This avoids potentially blocking property checks
                 client.refresh(null, (obj, res) => {
+                    // Check if extension was destroyed while waiting for callback
+                    if (this._destroyed) return;
                     try {
                         obj.refresh_finish(res);
                     } catch (e) {
@@ -422,9 +426,18 @@ const ChronomeIndicator = GObject.registerClass({
                 // Apply filters
                 if (isPast && !showPastEvents) continue;
                 if (isAllDay && !eventTypes.includes('all-day')) continue;
-                if (!isAllDay && !eventTypes.includes('regular')) continue;
-                if (isDeclined && !eventTypes.includes('declined')) continue;
-                if (isTentative && !eventTypes.includes('tentative')) continue;
+
+                // For non-all-day events: check declined/tentative first (they have their own toggles)
+                if (!isAllDay) {
+                    if (isDeclined) {
+                        if (!eventTypes.includes('declined')) continue;
+                    } else if (isTentative) {
+                        if (!eventTypes.includes('tentative')) continue;
+                    } else {
+                        // Regular events (not declined or tentative)
+                        if (!eventTypes.includes('regular')) continue;
+                    }
+                }
 
                 visibleEvents.push({
                     event, startTime, endTime, isPast, isAllDay,
@@ -579,13 +592,6 @@ const ChronomeIndicator = GObject.registerClass({
     _formatTimeRange(startTs, endTs, showEndTime = true) {
         const use24Hour = this._settings.get_string('time-format') === '24h';
         return formatTimeRange(startTs, endTs, showEndTime, use24Hour);
-    }
-
-    // Format a single time according to settings
-    // Delegates to pure function from lib/formatting.js
-    _formatTime(date) {
-        const use24Hour = this._settings.get_string('time-format') === '24h';
-        return formatTime(date, use24Hour);
     }
 
     // Format a duration in milliseconds as human-readable text
@@ -808,12 +814,6 @@ const ChronomeIndicator = GObject.registerClass({
         }
     }
 
-    // Parse an iCal property date/time from a raw iCal string
-    // Delegates to pure function from lib/icalParser.js
-    _parseIcalDateTime(icalStr, propName) {
-        return parseIcalDateTime(icalStr, propName);
-    }
-
     // Get event start time as timestamp
     // Returns 0 if DTSTART is missing/invalid, allowing filters to skip the event
     _getEventStart(event) {
@@ -1027,6 +1027,9 @@ const ChronomeIndicator = GObject.registerClass({
     // Async helper: Build map of rescheduled detached instances with caching
     // Uses targeted query '(has-recurrences? #t)' to only fetch recurring events (much smaller set)
     // Cache is invalidated when date changes or calendar is modified
+    // Returns: { rescheduledFromToday: Map, movedToToday: Array }
+    //   - rescheduledFromToday: events originally on today but moved elsewhere (skip these)
+    //   - movedToToday: events moved TO today from another date (add these, EDS won't return them)
     _buildRescheduledMapAsync(client, sourceUid, todayDateStr) {
         // Check if date changed - invalidate entire cache
         if (this._cacheDate !== todayDateStr) {
@@ -1039,12 +1042,18 @@ const ChronomeIndicator = GObject.registerClass({
             return Promise.resolve(this._rescheduledCache.get(sourceUid));
         }
 
+        const accountEmail = this._accountEmails.get(sourceUid) || null;
+        const calendarColor = this._calendarColors.get(sourceUid) || null;
+
         return new Promise((resolve) => {
-            const rescheduledInstances = new Map();
+            const result = {
+                rescheduledFromToday: new Map(),
+                movedToToday: [],
+            };
 
             try {
                 if (this._destroyed) {
-                    resolve(rescheduledInstances);
+                    resolve(result);
                     return;
                 }
                 // Use targeted query: fetch recurring events AND detached instances
@@ -1054,7 +1063,7 @@ const ChronomeIndicator = GObject.registerClass({
                 client.get_object_list_as_comps(query, this._cancellable, (obj, res) => {
                     try {
                         if (this._destroyed) {
-                            resolve(rescheduledInstances);
+                            resolve(result);
                             return;
                         }
                         const [success, storedComps] = client.get_object_list_as_comps_finish(res);
@@ -1067,47 +1076,70 @@ const ChronomeIndicator = GObject.registerClass({
                                 const recurIdDateStr = extractIcalDateString(icalStr, 'RECURRENCE-ID');
                                 if (!recurIdDateStr) continue;
 
-                                // Only care about instances with RECURRENCE-ID matching today
-                                if (recurIdDateStr !== todayDateStr) continue;
-
                                 // Get the stored DTSTART
                                 const storedDtstartDateStr = extractIcalDateString(icalStr, 'DTSTART');
 
                                 // Get UID
                                 const uid = comp.get_uid ? comp.get_uid() : '';
 
-                                if (uid && storedDtstartDateStr) {
-                                    // If DTSTART != RECURRENCE-ID date, this instance was rescheduled
-                                    if (storedDtstartDateStr !== recurIdDateStr) {
-                                        const key = `${uid}:${recurIdDateStr}`;
-                                        rescheduledInstances.set(key, storedDtstartDateStr);
+                                if (!uid || !storedDtstartDateStr) continue;
+
+                                // Case 1: RECURRENCE-ID == today, DTSTART != today
+                                // This event was originally on today but moved elsewhere - skip it
+                                if (recurIdDateStr === todayDateStr && storedDtstartDateStr !== todayDateStr) {
+                                    const key = `${uid}:${recurIdDateStr}`;
+                                    result.rescheduledFromToday.set(key, storedDtstartDateStr);
+                                }
+
+                                // Case 2: RECURRENCE-ID != today, DTSTART == today
+                                // This event was moved TO today from another date
+                                // EDS generate_instances_sync won't return it, so we add it manually
+                                if (recurIdDateStr !== todayDateStr && storedDtstartDateStr === todayDateStr) {
+                                    // Parse the times from the iCal string
+                                    const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
+                                    const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
+                                    const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
+
+                                    if (parsedStart?.timestampMs) {
+                                        // Get the inner ICalGLib.Component from ECal.Component
+                                        const icalComp = comp.get_icalcomponent ? comp.get_icalcomponent() : null;
+                                        if (icalComp) {
+                                            const instanceStartMs = parsedStart.timestampMs;
+                                            const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS); // Default 1hr
+                                            const recurrenceIdStartMs = parsedRecurId?.timestampMs || null;
+
+                                            result.movedToToday.push(
+                                                this._wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
+                                                    accountEmail, calendarColor, recurrenceIdStartMs)
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
 
                         // Store in cache
-                        this._rescheduledCache.set(sourceUid, rescheduledInstances);
-                        resolve(rescheduledInstances);
+                        this._rescheduledCache.set(sourceUid, result);
+                        resolve(result);
                     } catch (e) {
                         if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                            resolve(rescheduledInstances);
+                            resolve(result);
                             return;
                         }
                         console.error(`Chronome: Error in get_object_list_as_comps callback: ${e}`);
-                        // Store empty map in cache to avoid re-querying on error
-                        this._rescheduledCache.set(sourceUid, rescheduledInstances);
-                        resolve(rescheduledInstances);
+                        // Store empty result in cache to avoid re-querying on error
+                        this._rescheduledCache.set(sourceUid, result);
+                        resolve(result);
                     }
                 });
             } catch (e) {
                 if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                    resolve(rescheduledInstances);
+                    resolve(result);
                     return;
                 }
                 console.error(`Chronome: Error building rescheduled instances map: ${e}`);
-                this._rescheduledCache.set(sourceUid, rescheduledInstances);
-                resolve(rescheduledInstances);
+                this._rescheduledCache.set(sourceUid, result);
+                resolve(result);
             }
         });
     }
@@ -1132,14 +1164,17 @@ const ChronomeIndicator = GObject.registerClass({
 
         // Convert to Unix timestamps (seconds)
         const startTimet = Math.floor(todayStart.getTime() / 1000);
-        // Use ceil to round 23:59:59.999 up, ensuring events in the last second are included
-        const endTimet = Math.ceil(todayEnd.getTime() / 1000);
+        // Use floor to avoid including midnight of the next day
+        // 23:59:59.999 -> 86399 seconds (events in the last second are still included)
+        const endTimet = Math.floor(todayEnd.getTime() / 1000);
 
         // Format today's date as YYYYMMDD for comparison
         const todayDateStr = `${todayStart.getFullYear()}${String(todayStart.getMonth() + 1).padStart(2, '0')}${String(todayStart.getDate()).padStart(2, '0')}`;
 
         // PHASE 1: Build map of rescheduled detached instances (async, cached)
-        const rescheduledInstances = await this._buildRescheduledMapAsync(client, sourceUid, todayDateStr);
+        // Returns: { rescheduledFromToday: Map, movedToToday: Array }
+        const rescheduleData = await this._buildRescheduledMapAsync(client, sourceUid, todayDateStr);
+        const { rescheduledFromToday, movedToToday } = rescheduleData;
 
         // PHASE 2: Generate instances (async)
         let rawInstances;
@@ -1164,13 +1199,13 @@ const ChronomeIndicator = GObject.registerClass({
             if (recurrenceId && inst.comp.as_ical_string) {
                 const icalStr = inst.comp.as_ical_string();
 
-                const parsedRecurId = this._parseIcalDateTime(icalStr, 'RECURRENCE-ID');
+                const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
                 if (!recurrenceIdStartMs && parsedRecurId?.timestampMs) {
                     recurrenceIdStartMs = parsedRecurId.timestampMs;
                 }
 
-                const parsedStart = this._parseIcalDateTime(icalStr, 'DTSTART');
-                const parsedEnd = this._parseIcalDateTime(icalStr, 'DTEND');
+                const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
+                const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
 
                 if (parsedStart?.timestampMs) {
                     const originalDuration = inst.endMs - inst.startMs;
@@ -1187,7 +1222,7 @@ const ChronomeIndicator = GObject.registerClass({
                 const uid = inst.comp.get_uid ? inst.comp.get_uid() : '';
                 const key = `${uid}:${todayDateStr}`;
 
-                if (rescheduledInstances.has(key)) {
+                if (rescheduledFromToday.has(key)) {
                     // This instance was rescheduled to a different date - skip it
                     continue;
                 }
@@ -1199,6 +1234,11 @@ const ChronomeIndicator = GObject.registerClass({
             instances.push(this._wrapICalComponent(inst.comp, instanceStartMs, instanceEndMs,
                 accountEmail, calendarColor, recurrenceIdStartMs));
         }
+
+        // PHASE 4: Add events that were moved TO today from another date
+        // These won't be returned by generate_instances_sync (which matches by RECURRENCE-ID)
+        // They were already wrapped in Phase 1
+        instances.push(...movedToToday);
 
         // Filter out events that don't actually overlap with today's local date range.
         // This is needed because generate_instances_sync uses UTC-based overlap checks,
@@ -1322,18 +1362,6 @@ const ChronomeIndicator = GObject.registerClass({
         }
 
         return events;
-    }
-
-    // Check if an event has a RECURRENCE-ID (is an exception to a recurring event)
-    // Delegates to pure function from lib/eventUtils.js
-    _hasRecurrenceId(event) {
-        return hasRecurrenceId(event);
-    }
-
-    // Get a unique deduplication key for an event (UID + start time)
-    // Delegates to pure function from lib/eventUtils.js
-    _getEventDedupeKey(event) {
-        return getEventDedupeKey(event, this._getEventStart.bind(this));
     }
 
     // Deduplicate events - prefers exceptions over master occurrences
