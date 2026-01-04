@@ -148,7 +148,8 @@ export function createMockEvent(options = {}) {
         // Internal properties set by extension during processing
         _instanceStart: startTime,
         _instanceEnd: actualEndTime,
-        _recurrenceIdStart: recurrenceId ? startTime : null,
+        // Use recurrenceId timestamp (not startTime) to match real extension behavior
+        _recurrenceIdStart: recurrenceId || null,
         _accountEmail: accountEmail,
         _calendarColor: calendarColor,
         _comp: mockComp,

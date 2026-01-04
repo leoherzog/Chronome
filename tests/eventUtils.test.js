@@ -278,6 +278,44 @@ describe('getNextMeeting', function() {
         expect(result.get_uid()).toBe('declined');
     });
 
+    it('should show declined events even when regular is disabled', function() {
+        // This tests the fix for the filter bug where declined events were
+        // incorrectly filtered out when 'regular' was not in eventTypes
+        const declined = createMockEvent({ uid: 'declined', startTime: now + 3600000 });
+        const options = createHelpers({
+            isDeclinedEvent: (e) => e.get_uid() === 'declined',
+            eventTypes: ['declined'], // 'regular' is NOT included
+        });
+        const result = getNextMeeting([declined], options);
+        expect(result).not.toBeNull();
+        expect(result.get_uid()).toBe('declined');
+    });
+
+    it('should show tentative events even when regular is disabled', function() {
+        // This tests the fix for the filter bug where tentative events were
+        // incorrectly filtered out when 'regular' was not in eventTypes
+        const tentative = createMockEvent({ uid: 'tentative', startTime: now + 3600000 });
+        const options = createHelpers({
+            isTentativeEvent: (e) => e.get_uid() === 'tentative',
+            eventTypes: ['tentative'], // 'regular' is NOT included
+        });
+        const result = getNextMeeting([tentative], options);
+        expect(result).not.toBeNull();
+        expect(result.get_uid()).toBe('tentative');
+    });
+
+    it('should filter out regular events when only declined is enabled', function() {
+        const regular = createMockEvent({ uid: 'regular', startTime: now + 3600000 });
+        const declined = createMockEvent({ uid: 'declined', startTime: now + 7200000 });
+        const options = createHelpers({
+            isDeclinedEvent: (e) => e.get_uid() === 'declined',
+            eventTypes: ['declined'], // 'regular' is NOT included
+        });
+        const result = getNextMeeting([regular, declined], options);
+        expect(result).not.toBeNull();
+        expect(result.get_uid()).toBe('declined');
+    });
+
     it('should skip tentative events unless enabled', function() {
         const tentative = createMockEvent({ uid: 'tentative', startTime: now + 3600000 });
         const options = createHelpers({
