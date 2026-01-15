@@ -258,37 +258,36 @@ describe('getNextMeeting', function() {
         expect(getNextMeeting([allDay], options)).toBeNull();
     });
 
-    it('should skip declined events unless enabled', function() {
+    it('should always skip declined events in panel countdown', function() {
         const declined = createMockEvent({ uid: 'declined', startTime: now + 3600000 });
         const options = createHelpers({
             isDeclinedEvent: (e) => e.get_uid() === 'declined',
-            eventTypes: ['regular'], // declined not included
+            eventTypes: ['regular'],
         });
         expect(getNextMeeting([declined], options)).toBeNull();
     });
 
-    it('should show declined events when enabled', function() {
+    it('should skip declined events even when declined is in eventTypes', function() {
+        // Declined events should never appear in the panel countdown,
+        // regardless of the eventTypes setting (they still show in the menu)
         const declined = createMockEvent({ uid: 'declined', startTime: now + 3600000 });
         const options = createHelpers({
             isDeclinedEvent: (e) => e.get_uid() === 'declined',
             eventTypes: ['regular', 'declined'],
         });
-        const result = getNextMeeting([declined], options);
-        expect(result).not.toBeNull();
-        expect(result.get_uid()).toBe('declined');
+        expect(getNextMeeting([declined], options)).toBeNull();
     });
 
-    it('should show declined events even when regular is disabled', function() {
-        // This tests the fix for the filter bug where declined events were
-        // incorrectly filtered out when 'regular' was not in eventTypes
+    it('should skip declined and return next regular event', function() {
         const declined = createMockEvent({ uid: 'declined', startTime: now + 3600000 });
+        const regular = createMockEvent({ uid: 'regular', startTime: now + 7200000 });
         const options = createHelpers({
             isDeclinedEvent: (e) => e.get_uid() === 'declined',
-            eventTypes: ['declined'], // 'regular' is NOT included
+            eventTypes: ['regular', 'declined'],
         });
-        const result = getNextMeeting([declined], options);
+        const result = getNextMeeting([declined, regular], options);
         expect(result).not.toBeNull();
-        expect(result.get_uid()).toBe('declined');
+        expect(result.get_uid()).toBe('regular');
     });
 
     it('should show tentative events even when regular is disabled', function() {
@@ -304,16 +303,17 @@ describe('getNextMeeting', function() {
         expect(result.get_uid()).toBe('tentative');
     });
 
-    it('should filter out regular events when only declined is enabled', function() {
+    it('should return null when only declined events exist and regular is disabled', function() {
+        // With declined always excluded from panel countdown, if only declined
+        // events exist and regular is disabled, there's nothing to show
         const regular = createMockEvent({ uid: 'regular', startTime: now + 3600000 });
         const declined = createMockEvent({ uid: 'declined', startTime: now + 7200000 });
         const options = createHelpers({
             isDeclinedEvent: (e) => e.get_uid() === 'declined',
             eventTypes: ['declined'], // 'regular' is NOT included
         });
-        const result = getNextMeeting([regular, declined], options);
-        expect(result).not.toBeNull();
-        expect(result.get_uid()).toBe('declined');
+        // Both get filtered: regular because not in eventTypes, declined because always excluded
+        expect(getNextMeeting([regular, declined], options)).toBeNull();
     });
 
     it('should skip tentative events unless enabled', function() {
