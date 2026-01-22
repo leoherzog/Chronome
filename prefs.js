@@ -5,7 +5,7 @@ import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
-import {deduplicateSources} from './calendarUtils.js';
+import {deduplicateSources} from './lib/calendarUtils.js';
 
 export default class ChronomePreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {

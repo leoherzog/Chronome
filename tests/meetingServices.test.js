@@ -1,6 +1,6 @@
 // Tests for meetingServices.js
 import { describe, it, expect } from './runner.js';
-import { findMeetingUrl } from '../meetingServices.js';
+import { findMeetingUrl } from '../lib/meetingServices.js';
 
 describe('findMeetingUrl', function() {
     // Google Meet

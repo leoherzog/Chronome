@@ -15,17 +15,15 @@ import ECal from 'gi://ECal?version=2.0';
 import EDataServer from 'gi://EDataServer?version=1.2';
 import ICalGLib from 'gi://ICalGLib?version=3.0';
 
-// Meeting URL detection
-import {findMeetingUrl} from './meetingServices.js';
-
 // Calendar utilities (shared with prefs.js)
-import {getAccountEmailForSource, getCalendarIdForSource, getCalendarColor, deduplicateSources} from './calendarUtils.js';
+import {getAccountEmailForSource, getCalendarIdForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';
 
 // Pure utility modules (testable with gjs -m)
 import {formatDuration, formatTimeRange, truncateText} from './lib/formatting.js';
 import {parseIcalDateTime, extractIcalDateString} from './lib/icalParser.js';
 import {deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHeuristic} from './lib/eventUtils.js';
 import {ONE_HOUR_MS, ONE_MINUTE_MS, FIVE_MINUTES_MS} from './lib/constants.js';
+import {findMeetingUrl} from './lib/meetingServices.js';
 
 // Constants
 const CONSTANTS = {
