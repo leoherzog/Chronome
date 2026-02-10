@@ -6,6 +6,7 @@ import {
     getEventDedupeKey,
     deduplicateEvents,
     isAllDayEventHeuristic,
+    getCurrentMeetings,
     getNextMeeting,
     sortEventsByStartTime,
 } from '../lib/eventUtils.js';
@@ -225,6 +226,22 @@ describe('getNextMeeting', function() {
         expect(result.get_uid()).toBe('current');
     });
 
+    it('should pick the current meeting ending soonest when multiple overlap', function() {
+        const endingLater = createMockEvent({
+            uid: 'ending-later',
+            startTime: now - 1200000,
+            endTime: now + 3600000,
+        });
+        const endingSooner = createMockEvent({
+            uid: 'ending-sooner',
+            startTime: now - 900000,
+            endTime: now + 1200000,
+        });
+        const result = getNextMeeting([endingLater, endingSooner], createHelpers());
+        expect(result).not.toBeNull();
+        expect(result.get_uid()).toBe('ending-sooner');
+    });
+
     it('should skip current event ending within 5 minutes', function() {
         const endingSoon = createMockEvent({
             uid: 'ending-soon',
@@ -348,6 +365,57 @@ describe('getNextMeeting', function() {
         });
         const result = getNextMeeting([pastEvent], createHelpers());
         expect(result).toBeNull();
+    });
+});
+
+describe('getCurrentMeetings', function() {
+    const now = new Date(2025, 0, 1, 10, 0, 0).getTime();
+
+    const createHelpers = (overrides = {}) => ({
+        getEventStart: (e) => e._instanceStart,
+        getEventEnd: (e) => e._instanceEnd,
+        isAllDayEvent: () => false,
+        isDeclinedEvent: () => false,
+        isTentativeEvent: () => false,
+        eventTypes: ['regular'],
+        now,
+        ...overrides,
+    });
+
+    it('should return empty array for empty input', function() {
+        expect(getCurrentMeetings([], createHelpers())).toEqual([]);
+        expect(getCurrentMeetings(null, createHelpers())).toEqual([]);
+        expect(getCurrentMeetings(undefined, createHelpers())).toEqual([]);
+    });
+
+    it('should return current meetings sorted by end time', function() {
+        const endingLater = createMockEvent({
+            uid: 'later',
+            startTime: now - 1200000,
+            endTime: now + 3600000,
+        });
+        const endingSooner = createMockEvent({
+            uid: 'sooner',
+            startTime: now - 900000,
+            endTime: now + 1200000,
+        });
+        const current = getCurrentMeetings([endingLater, endingSooner], createHelpers());
+        expect(current).toHaveLength(2);
+        expect(current[0].get_uid()).toBe('sooner');
+        expect(current[1].get_uid()).toBe('later');
+    });
+
+    it('should include near-ending meetings when minRemainingMs is zero', function() {
+        const endingSoon = createMockEvent({
+            uid: 'ending-soon',
+            startTime: now - 1200000,
+            endTime: now + 2 * 60000,
+        });
+        const current = getCurrentMeetings([endingSoon], createHelpers({
+            minRemainingMs: 0,
+        }));
+        expect(current).toHaveLength(1);
+        expect(current[0].get_uid()).toBe('ending-soon');
     });
 });
 

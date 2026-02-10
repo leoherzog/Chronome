@@ -12,6 +12,7 @@ import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js'
 
 // Pure utility modules (display-side only)
 import {formatDuration, formatTimeRange, truncateText} from './lib/formatting.js';
+import {getCurrentMeetings} from './lib/eventUtils.js';
 
 // D-Bus constants
 const DBUS_NAME = 'tech.herzog.Chronome1';
@@ -225,22 +226,65 @@ const ChronomeIndicator = GObject.registerClass({
         const now = Date.now();
 
         if (!this._settings.get_boolean('real-time-countdown')) {
-            if (startTime <= now && endTime > now)
-                this._updateLabel(`${_('Now:')} ${shortenedTitle}`);
-            else
+            if (startTime <= now && endTime > now) {
+                const concurrentSuffix = this._getConcurrentCurrentMeetingSuffix(nextMeeting, now);
+                this._updateLabel(`${_('Now:')} ${shortenedTitle}${concurrentSuffix}`);
+            } else {
                 this._updateLabel(`${_('Next:')} ${shortenedTitle}`);
+            }
             return;
         }
 
         if (startTime <= now && endTime > now) {
             const remainingMs = endTime - now;
             const remainingText = this._formatDuration(remainingMs) + ' ' + _('left');
-            this._updateLabel(`${remainingText} ${_('in')} ${shortenedTitle}`);
+            const concurrentSuffix = this._getConcurrentCurrentMeetingSuffix(nextMeeting, now);
+            this._updateLabel(`${remainingText} ${_('in')} ${shortenedTitle}${concurrentSuffix}`);
             return;
         }
 
         const diffMs = startTime - now;
         this._updateLabel(`${this._formatDuration(diffMs)} ${_('until')} ${shortenedTitle}`);
+    }
+
+    // Show "+N" for additional meetings happening at the same time.
+    _getConcurrentCurrentMeetingSuffix(nextMeeting, now) {
+        const currentMeetings = getCurrentMeetings(this._events, {
+            getEventStart: e => e.startMs,
+            getEventEnd: e => e.endMs,
+            isAllDayEvent: e => e.isAllDay,
+            isDeclinedEvent: e => e.isDeclined,
+            isTentativeEvent: e => e.isTentative,
+            eventTypes: this._settings.get_strv('event-types'),
+            now,
+            minRemainingMs: 0,
+        });
+
+        if (currentMeetings.length <= 1)
+            return '';
+
+        let matchedPrimary = false;
+        let additionalCount = 0;
+
+        for (const event of currentMeetings) {
+            if (!matchedPrimary && this._isSameMeeting(nextMeeting, event)) {
+                matchedPrimary = true;
+                continue;
+            }
+            additionalCount++;
+        }
+
+        if (!matchedPrimary || additionalCount <= 0)
+            return '';
+
+        return ` +${additionalCount}`;
+    }
+
+    _isSameMeeting(nextMeeting, event) {
+        if (!nextMeeting || !event) return false;
+        return nextMeeting.startMs === event.startMs &&
+            nextMeeting.endMs === event.endMs &&
+            nextMeeting.title === event.title;
     }
 
     // Update dropdown menu with today's events
