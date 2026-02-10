@@ -10,7 +10,8 @@ Chronome is a GNOME Shell extension that displays upcoming calendar meetings in 
 
 ```
 Chronome/
-├── extension.js           # Main extension code (ChronomeIndicator class)
+├── extension.js           # Thin UI layer (panel indicator, menu, D-Bus proxy)
+├── service.js             # D-Bus service (EDS connections, event processing)
 ├── prefs.js               # Preferences window (Adw/libadwaita)
 ├── metadata.json          # Extension metadata (UUID, versions, etc.)
 ├── stylesheet.css         # Custom CSS styles
@@ -124,6 +125,7 @@ Only `lib/` modules are tested - they are pure functions with no GNOME Shell dep
 This creates `chronome@herzog.tech.zip` containing:
 - `metadata.json`
 - `extension.js`
+- `service.js`
 - `prefs.js`
 - `stylesheet.css`
 - `lib/` (all utility modules)
@@ -152,35 +154,92 @@ Automatically attaches a release zip when a GitHub Release is published:
 
 ## Architecture
 
+### Split Architecture: Extension + D-Bus Service
+
+The extension uses a split architecture to keep heavy computation out of the GNOME Shell process:
+
+```
+extension.js  (UI layer, runs inside GNOME Shell)
+    │  Spawns on enable(), kills on disable()
+    │  D-Bus proxy ← EventsChanged signal
+    ▼
+service.js  (computation layer, runs as subprocess)
+    │  Owns EDS connections, processes events
+    │  Emits EventsChanged with JSON payload
+    ▼
+lib/  (shared pure modules, used by both)
+```
+
+**D-Bus Interface** (`tech.herzog.Chronome1` on session bus):
+- **Methods**: `GetEvents() → s` (JSON), `Refresh()`, `Ping() → b`
+- **Signals**: `EventsChanged(s)` (JSON payload)
+- **Object path**: `/tech/herzog/Chronome`
+
+**Data format** (JSON over D-Bus):
+- `nextMeeting`: `{ startMs, endMs, title, hasVideoLink }` or `null`
+- `events[]`: `{ startMs, endMs, title, videoLink, calendarColor, isAllDay, isDeclined, isTentative, isNeedsResponse }`
+
+The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`, time range formatting, countdown text, title truncation, menu filtering.
+
+### Settings Split
+
+| Setting | Who reads it |
+|---|---|
+| `enabled-calendars`, `show-current-meeting` | Service (data selection) |
+| `event-types` | Both (Service: next-meeting selection, Extension: menu filtering) |
+| `refresh-interval` | Service (fetch timer period) |
+| `show-past-events`, `show-event-end-time`, `time-format` | Extension (display) |
+| `use-calendar-colors`, `event-title-length` | Extension (display) |
+| `real-time-countdown`, `status-bar-icon-type` | Extension (display) |
+
 ### Core Files
 
-- **extension.js**: Main extension code with `ChronomeIndicator` class (PanelMenu.Button subclass) that handles:
-  - Calendar data fetching via ECal/EDataServer async APIs
+- **extension.js**: Thin UI layer with `ChronomeIndicator` class (PanelMenu.Button subclass) that handles:
   - Panel label updates with countdown timers
-  - Dropdown menu with today's events
-  - Video conferencing link detection and launching
+  - Dropdown menu with today's events (from pre-computed JSON)
+  - D-Bus proxy for communicating with the service
+  - Subprocess lifecycle (spawn on enable, kill on disable, auto-restart)
+
+- **service.js**: D-Bus service that handles:
+  - Calendar data fetching via ECal/EDataServer async APIs
+  - Event analysis (PARTSTAT, all-day detection, video link detection)
+  - Event deduplication and next meeting selection
+  - JSON serialization and D-Bus signal emission
+  - GSettings monitoring for data-affecting settings
 
 - **prefs.js**: Preferences window using Adw (libadwaita) with pages for General, Appearance, and Calendars settings
 
 - **schemas/org.gnome.shell.extensions.chronome.gschema.xml**: GSettings schema defining all configurable options
 
-### Internal Constants (extension.js)
+### Service Lifecycle
 
+1. `enable()`: spawns `gjs -m service.js` via `Gio.Subprocess`
+2. Service registers on D-Bus, starts EDS connections, emits `EventsChanged`
+3. Extension receives signal, parses JSON, updates UI
+4. `disable()`: `force_exit()` on subprocess, destroy indicator
+5. Auto-restart: `wait_async()` callback detects service death, restarts after 2s
+
+### Internal Constants
+
+**service.js:**
 - `DEBOUNCE_MS: 500` - Debounce delay for calendar change signals
 - `CLIENT_CONNECT_TIMEOUT_SEC: 10` - Timeout for EDS client connections
 - `SYNC_DELAY_MS: 50` - Delay between calendar sync requests
+
+**extension.js:**
 - `OPACITY_DIMMED: 178` (~70%) - Opacity for past/declined events
 - `OPACITY_TENTATIVE: 204` (~80%) - Opacity for tentative events
 - `MENU_ICON_SIZE: 16` - Icon size in dropdown menu
+- `SERVICE_RESTART_DELAY_SEC: 2` - Delay before auto-restarting dead service
 
 ### Key Technical Details
 
 - Uses GJS (GNOME JavaScript) with ES modules
 - Imports from `gi://` for GObject introspection bindings (ECal, EDataServer, St, Clutter, etc.)
 - Async calendar operations use Promise wrappers around EDS callback-based APIs
-- Blocking operations wrapped in `GLib.idle_add()` to avoid freezing GNOME Shell on login
-- Real-time countdown uses `GLib.timeout_add_seconds` timers
-- Calendar change notifications via `ECalClientView` signals with debounced refresh
+- Blocking operations wrapped in `GLib.idle_add()` to avoid freezing the service main loop
+- Real-time countdown uses `GLib.timeout_add_seconds` timers in extension.js
+- Calendar change notifications via `ECalClientView` signals with debounced refresh in service
 - Rescheduled instance detection uses per-source caching with automatic invalidation
 - Video link detection uses regex patterns from MeetingBar project
 
@@ -248,9 +307,14 @@ Time constants in milliseconds:
 
 ### Settings Change Behavior
 
-- **Full refresh triggers:** `enabled-calendars`, `show-current-meeting`, `event-types`, `show-past-events`, `show-event-end-time`, `time-format`, `use-calendar-colors`
-- **Label update only:** `real-time-countdown`, `event-title-length`
-- **Icon update only:** `status-bar-icon-type`
+**Service side (triggers re-fetch and EventsChanged signal):**
+- `enabled-calendars`, `event-types`, `show-current-meeting`
+- `refresh-interval` (restarts fetch timer)
+
+**Extension side (local UI update from cached data):**
+- `show-past-events`, `show-event-end-time`, `time-format`, `use-calendar-colors`, `event-types` (menu re-render)
+- `real-time-countdown`, `event-title-length` (label update only)
+- `status-bar-icon-type` (icon update only)
 
 ## Code Conventions
 
@@ -295,14 +359,14 @@ import {functionName} from './lib/moduleName.js';
 
 ## Common Pitfalls for AI Agents
 
-### Async Safety
+### Async Safety (service.js)
 
-1. **Check cancellable**: Always check `if (!this._cancellable) return;` at the start of async callbacks to prevent post-destruction updates. The cancellable is set to null in `destroy()` and serves as the destroyed flag.
+1. **Check cancellable**: Always check `if (!this._cancellable) return;` at the start of async callbacks to prevent post-shutdown updates. The cancellable is set to null in `_shutdown()` and serves as the destroyed flag.
 
-2. **Callback wrapping**: EDS async operations use callbacks, not Promises. The extension wraps them:
+2. **Callback wrapping**: EDS async operations use callbacks, not Promises. The service wraps them:
    ```javascript
    client.refresh(this._cancellable, (obj, res) => {
-       if (!this._cancellable) return;  // CRITICAL: extension may be destroyed
+       if (!this._cancellable) return;  // CRITICAL: service may be shutting down
        try { obj.refresh_finish(res); } catch (e) { ... }
    });
    ```
@@ -310,9 +374,8 @@ import {functionName} from './lib/moduleName.js';
 ### GLib Timer Management
 
 - Use `GLib.timeout_add_seconds()` not `setTimeout()`
-- ALL GLib sources (timeout_add, idle_add) must be removed when the extension is disabled
-- Named timers (fetch, display, debounce) are tracked individually and removed in `destroy()`
-- Fire-and-forget sources use `this._sourceIds` Set for tracking:
+- **extension.js**: Display timer removed in `destroy()`, restart timeout removed in `disable()`
+- **service.js**: ALL GLib sources must be removed in `_shutdown()`. Named timers (fetch, debounce) tracked individually. Fire-and-forget sources use `this._sourceIds` Set:
   ```javascript
   const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
       this._sourceIds?.delete(id);
@@ -322,9 +385,9 @@ import {functionName} from './lib/moduleName.js';
   this._sourceIds?.add(id);
   ```
 
-### Blocking Operations
+### Blocking Operations (service.js)
 
-- Never call synchronous EDS methods directly during extension load
+- Never call synchronous EDS methods directly at startup
 - Wrap with `GLib.idle_add()` to defer execution:
   ```javascript
   GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
@@ -348,35 +411,41 @@ Methods differ:
 
 ### Settings Signal Cleanup
 
-Always disconnect settings signals in `destroy()`:
+Always disconnect settings signals during cleanup:
+- **extension.js**: In `destroy()` of `ChronomeIndicator`
+- **service.js**: In `_shutdown()`
+
 ```javascript
 for (const id of this._settingsSignals) {
     this._settings.disconnect(id);
 }
 ```
 
-### Cancellable for Async Operations
+### Cancellable for Async Operations (service.js)
 
-Use `Gio.Cancellable` for EDS async operations and cancel in `destroy()`:
+Use `Gio.Cancellable` for EDS async operations and cancel in `_shutdown()`:
 ```javascript
 this._cancellable = new Gio.Cancellable();
-// In destroy:
+// In _shutdown:
 this._cancellable.cancel();
+this._cancellable = null;
 ```
 
 ## Event Handling
 
-Events are fetched using async wrappers around `ECal.Client.generate_instances_sync()` which properly expands recurring events. Key implementation details:
+Events are fetched in `service.js` using async wrappers around `ECal.Client.generate_instances_sync()` which properly expands recurring events. Key implementation details:
 
-- **Non-blocking async**: All EDS operations use async patterns (callbacks wrapped in Promises, idle callbacks) to avoid blocking GNOME Shell startup
+- **Non-blocking async**: All EDS operations use async patterns (callbacks wrapped in Promises, idle callbacks) to avoid blocking the service main loop
 - **Recurring event expansion**: Uses `generate_instances_sync()` wrapped in `GLib.idle_add()` to get actual occurrence times without blocking
 - **Deduplication**: Events are deduplicated by UID + start time, preferring exceptions over master occurrences
 - **ICalGLib.Component wrapping**: The callback returns `ICalGLib.Component` objects (not `ECal.Component`), which are wrapped with instance times and proxy methods
+- **JSON serialization**: Service converts event wrappers to plain JSON objects and emits via D-Bus `EventsChanged` signal
 
-The extension also tracks:
+The service also computes:
 - Current user's participation status (accepted/declined/tentative) via attendee parsing
 - All-day events via `dtStart.is_date()` check
 - Video conference URLs in location and description fields
+- Next meeting selection (exported in `nextMeeting` field)
 
 ## Recurring Event and Detached Instance Handling
 

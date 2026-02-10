@@ -15,6 +15,7 @@ rm -f "$OUTPUT_FILE"
 zip -r "$OUTPUT_FILE" \
     metadata.json \
     extension.js \
+    service.js \
     prefs.js \
     stylesheet.css \
     lib/ \
