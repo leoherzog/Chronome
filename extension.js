@@ -94,11 +94,11 @@ const ChronomeIndicator = GObject.registerClass({
         this._rescheduledCache = new Map();
         this._cacheDate = null; // Track which date the cache is for
 
-        // Flag to prevent post-destroy callbacks
-        this._destroyed = false;
-
-        // Cancellable for async EDS operations
+        // Cancellable for async EDS operations (also serves as destroyed flag: null after destroy)
         this._cancellable = new Gio.Cancellable();
+
+        // Track fire-and-forget GLib sources for cleanup on destroy
+        this._sourceIds = new Set();
 
         // Connect settings signals using consolidated pattern
         this._settingsSignals = [];
@@ -231,38 +231,37 @@ const ChronomeIndicator = GObject.registerClass({
 
         // Process clients one by one with a small delay to avoid flooding the system
         for (const client of clients) {
-            // Yield to main loop
-            await new Promise(r => GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.SYNC_DELAY_MS, () => {
-                r();
-                return GLib.SOURCE_REMOVE;
-            }));
+            if (!this._cancellable) return;
 
-            try {
-                // Try to refresh without checking support first (async)
-                // This avoids potentially blocking property checks
-                client.refresh(null, (obj, res) => {
-                    // Check if extension was destroyed while waiting for callback
-                    if (this._destroyed) return;
-                    try {
-                        obj.refresh_finish(res);
-                    } catch (e) {
-                        // Ignore "not supported" errors, log others
-                        if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED)) {
-                             console.debug(`Chronome: Calendar sync failed: ${e.message}`);
-                        }
-                    }
+            // Yield to main loop (tracked for cleanup on destroy)
+            await new Promise(r => {
+                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.SYNC_DELAY_MS, () => {
+                    this._sourceIds?.delete(id);
+                    r();
+                    return GLib.SOURCE_REMOVE;
                 });
-            } catch (e) {
-                console.error(`Chronome: Error triggering sync: ${e}`);
-            }
+                this._sourceIds?.add(id);
+            });
+
+            if (!this._cancellable) return;
+
+            client.refresh(this._cancellable, (obj, res) => {
+                if (!this._cancellable) return;
+                try {
+                    obj.refresh_finish(res);
+                } catch (e) {
+                    if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED)) {
+                         console.debug(`Chronome: Calendar sync failed: ${e.message}`);
+                    }
+                }
+            });
         }
     }
 
     // Refresh calendar events and update the UI
     _refreshEvents() {
-        if (this._destroyed) {
-            return GLib.SOURCE_REMOVE;
-        }
+        if (!this._cancellable) return GLib.SOURCE_REMOVE;
+
         // Prevent concurrent refreshes - queue if already in progress
         if (this._refreshInProgress) {
             this._pendingRefresh = true;
@@ -274,34 +273,19 @@ const ChronomeIndicator = GObject.registerClass({
 
         // Start async refresh
         this._fetchAllEventsAsync().then(allEvents => {
-            // Prevent UI updates after widget is destroyed
-            if (this._destroyed) return;
+            if (!this._cancellable) return;
 
-            try {
-                if (allEvents.length === 0) {
-                    // No events found - could be no calendars or no events today
-                    this._nextMeeting = null;
-                    this._updateMenu([]);
-                    this._updatePanelLabel(null);
-                    this._updateIcon();
-                } else {
-                    const todayEvents = this._deduplicateEvents(allEvents);
-
-                    // Update top bar text
-                    this._nextMeeting = this._getNextMeeting(todayEvents);
-
-                    // Update menu with today's events
-                    this._updateMenu(todayEvents);
-
-                    // Update panel label with next meeting info
-                    this._updatePanelLabel(this._nextMeeting);
-
-                    // Update icon (for meeting-type mode, depends on video link)
-                    this._updateIcon();
-                }
-            } catch (e) {
-                console.error(`Chronome: Error processing events: ${e}`);
-                this._showError();
+            if (allEvents.length === 0) {
+                this._nextMeeting = null;
+                this._updateMenu([]);
+                this._updatePanelLabel(null);
+                this._updateIcon();
+            } else {
+                const todayEvents = this._deduplicateEvents(allEvents);
+                this._nextMeeting = this._getNextMeeting(todayEvents);
+                this._updateMenu(todayEvents);
+                this._updatePanelLabel(this._nextMeeting);
+                this._updateIcon();
             }
         }).catch(e => {
             console.error(`Chronome: Error fetching events: ${e}`);
@@ -309,14 +293,14 @@ const ChronomeIndicator = GObject.registerClass({
         }).finally(() => {
             this._refreshInProgress = false;
 
-            // Process any queued refresh (but not if destroyed)
-            if (this._pendingRefresh && !this._destroyed) {
-                GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                    if (!this._destroyed) {
-                        this._refreshEvents();
-                    }
+            // Process any queued refresh
+            if (this._pendingRefresh && this._cancellable) {
+                const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    this._sourceIds?.delete(id);
+                    if (this._cancellable) this._refreshEvents();
                     return GLib.SOURCE_REMOVE;
                 });
+                this._sourceIds?.add(id);
             }
         });
 
@@ -343,48 +327,35 @@ const ChronomeIndicator = GObject.registerClass({
         // Show label when we have a meeting to display
         this._label.show();
 
-        try {
-            // Get meeting title
-            const titleText = this._getEventTitle(nextMeeting);
+        const titleText = this._getEventTitle(nextMeeting);
+        const maxLength = this._settings.get_int('event-title-length');
+        const shortenedTitle = truncateText(titleText, maxLength);
 
-            // Shorten title if needed
-            const maxLength = this._settings.get_int('event-title-length');
-            const shortenedTitle = truncateText(titleText, maxLength);
+        const startTime = this._getEventStart(nextMeeting);
+        const endTime = this._getEventEnd(nextMeeting);
+        const now = Date.now();
 
-            // Get start and end times
-            const startTime = this._getEventStart(nextMeeting);
-            const endTime = this._getEventEnd(nextMeeting);
-
-            // Current time
-            const now = Date.now();
-
-            // Simple mode when real-time countdown is disabled
-            if (!this._settings.get_boolean('real-time-countdown')) {
-                if (startTime <= now && endTime > now) {
-                    this._updateLabel(`${_('Now:')} ${shortenedTitle}`);
-                } else {
-                    this._updateLabel(`${_('Next:')} ${shortenedTitle}`);
-                }
-                return;
-            }
-
-            // Check if meeting is happening now
+        // Simple mode when real-time countdown is disabled
+        if (!this._settings.get_boolean('real-time-countdown')) {
             if (startTime <= now && endTime > now) {
-                // Meeting is happening now - show time remaining
-                const remainingMs = endTime - now;
-                const remainingText = this._formatDuration(remainingMs) + ' ' + _('left');
-                this._updateLabel(`${remainingText} ${_('in')} ${shortenedTitle}`);
-                return;
+                this._updateLabel(`${_('Now:')} ${shortenedTitle}`);
+            } else {
+                this._updateLabel(`${_('Next:')} ${shortenedTitle}`);
             }
-
-            // Time difference in milliseconds for upcoming meeting
-            const diffMs = startTime - now;
-            const display = this._formatDuration(diffMs);
-            this._updateLabel(`${display} ${_('until')} ${shortenedTitle}`);
-
-        } catch (e) {
-            this._updateLabel(_('Meeting error'));
+            return;
         }
+
+        // Check if meeting is happening now
+        if (startTime <= now && endTime > now) {
+            const remainingMs = endTime - now;
+            const remainingText = this._formatDuration(remainingMs) + ' ' + _('left');
+            this._updateLabel(`${remainingText} ${_('in')} ${shortenedTitle}`);
+            return;
+        }
+
+        // Time difference in milliseconds for upcoming meeting
+        const diffMs = startTime - now;
+        this._updateLabel(`${this._formatDuration(diffMs)} ${_('until')} ${shortenedTitle}`);
     }
 
     // Update dropdown menu with today's events
@@ -412,41 +383,36 @@ const ChronomeIndicator = GObject.registerClass({
         // First pass: collect visible event data
         const visibleEvents = [];
         for (const event of todayEvents) {
-            try {
-                const startTime = this._getEventStart(event);
-                const endTime = this._getEventEnd(event);
-                const isPast = endTime < now;
-                const isAllDay = this._isAllDayEvent(event);
-                const isDeclined = this._isDeclinedEvent(event);
-                const isTentative = this._isTentativeEvent(event);
-                const isNeedsResponse = this._isNeedsResponseEvent(event);
+            const startTime = this._getEventStart(event);
+            const endTime = this._getEventEnd(event);
+            const isPast = endTime < now;
+            const isAllDay = this._isAllDayEvent(event);
+            const isDeclined = this._isDeclinedEvent(event);
+            const isTentative = this._isTentativeEvent(event);
+            const isNeedsResponse = this._isNeedsResponseEvent(event);
 
-                // Apply filters
-                if (isPast && !showPastEvents) continue;
-                if (isAllDay && !eventTypes.includes('all-day')) continue;
+            // Apply filters
+            if (isPast && !showPastEvents) continue;
+            if (isAllDay && !eventTypes.includes('all-day')) continue;
 
-                // For non-all-day events: check declined/tentative first (they have their own toggles)
-                if (!isAllDay) {
-                    if (isDeclined) {
-                        if (!eventTypes.includes('declined')) continue;
-                    } else if (isTentative) {
-                        if (!eventTypes.includes('tentative')) continue;
-                    } else {
-                        // Regular events (not declined or tentative)
-                        if (!eventTypes.includes('regular')) continue;
-                    }
+            // For non-all-day events: check declined/tentative first (they have their own toggles)
+            if (!isAllDay) {
+                if (isDeclined) {
+                    if (!eventTypes.includes('declined')) continue;
+                } else if (isTentative) {
+                    if (!eventTypes.includes('tentative')) continue;
+                } else {
+                    if (!eventTypes.includes('regular')) continue;
                 }
-
-                visibleEvents.push({
-                    event, startTime, endTime, isPast, isAllDay,
-                    isDeclined, isTentative, isNeedsResponse,
-                    timeRange: isAllDay ? _('All Day') : this._formatTimeRange(startTime, endTime, showEndTime),
-                    title: this._getEventTitle(event),
-                    link: this._findVideoLink(event),
-                });
-            } catch (e) {
-                console.debug(`Chronome: Error processing event: ${e.message}`);
             }
+
+            visibleEvents.push({
+                event, startTime, endTime, isPast, isAllDay,
+                isDeclined, isTentative, isNeedsResponse,
+                timeRange: isAllDay ? _('All Day') : this._formatTimeRange(startTime, endTime, showEndTime),
+                title: this._getEventTitle(event),
+                link: this._findVideoLink(event),
+            });
         }
 
         if (visibleEvents.length === 0) {
@@ -600,173 +566,94 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Check if an event is an all-day event
     _isAllDayEvent(event) {
-        try {
-            if (!event) return false;
+        if (!event) return false;
 
-            // The proper way to detect all-day events is to check if DTSTART
-            // has VALUE=DATE (date-only, no time component)
-            if (typeof event.get_dtstart === 'function') {
-                const dtStart = event.get_dtstart();
-                if (dtStart) {
-                    // Check if the time is a DATE value (all-day) vs DATE-TIME
-                    // In libical, DATE values have is_date() = true
-                    if (typeof dtStart.is_date === 'function') {
-                        if (dtStart.is_date()) {
-                            return true;
-                        }
-                    }
-                    // Alternative: check if the value has the is_date property
-                    if (typeof dtStart.get_value === 'function') {
-                        const dtValue = dtStart.get_value();
-                        if (dtValue && typeof dtValue.is_date === 'function') {
-                            if (dtValue.is_date()) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback heuristic: check if starts at midnight and duration is multiple of 24h
-            // Delegates to pure function from lib/eventUtils.js
-            const startTime = this._getEventStart(event);
-            const endTime = this._getEventEnd(event);
-            return isAllDayEventHeuristic(startTime, endTime);
-        } catch (e) {
-            return false;
+        // The proper way to detect all-day events is to check if DTSTART
+        // has VALUE=DATE (date-only, no time component)
+        const dtStart = event.get_dtstart();
+        if (dtStart) {
+            // In libical, DATE values have is_date() = true
+            if (dtStart.is_date?.()) return true;
+            // Alternative: check if the value wrapper has is_date
+            if (dtStart.get_value?.()?.is_date?.()) return true;
         }
+
+        // Fallback heuristic: check if starts at midnight and duration is multiple of 24h
+        const startTime = this._getEventStart(event);
+        const endTime = this._getEventEnd(event);
+        return isAllDayEventHeuristic(startTime, endTime);
     }
 
     // Check if the current user (calendar account owner) has a specific PARTSTAT
     // Uses ICalGLib property iteration API (more reliable than get_attendees())
     _hasCurrentUserPartstat(event, targetPartstat) {
-        try {
-            if (!event) return false;
+        if (!event) return false;
 
-            // Get the underlying ICalGLib.Component
-            const comp = event._comp;
-            if (!comp) return false;
+        const comp = event._comp;
+        if (!comp) return false;
 
-            // Get the account email for this calendar
-            const accountEmail = event._accountEmail;
-            if (!accountEmail) return false;
+        const accountEmail = event._accountEmail;
+        if (!accountEmail) return false;
 
-            // Map string PARTSTAT to ICalGLib enum values
-            const partstatMap = {
-                'DECLINED': ICalGLib.ParameterPartstat.DECLINED,
-                'TENTATIVE': ICalGLib.ParameterPartstat.TENTATIVE,
-                'NEEDS-ACTION': ICalGLib.ParameterPartstat.NEEDSACTION,
-                'ACCEPTED': ICalGLib.ParameterPartstat.ACCEPTED,
-            };
-            const targetValue = partstatMap[targetPartstat];
-            if (targetValue === undefined) return false;
+        const partstatMap = {
+            'DECLINED': ICalGLib.ParameterPartstat.DECLINED,
+            'TENTATIVE': ICalGLib.ParameterPartstat.TENTATIVE,
+            'NEEDS-ACTION': ICalGLib.ParameterPartstat.NEEDSACTION,
+            'ACCEPTED': ICalGLib.ParameterPartstat.ACCEPTED,
+        };
+        const targetValue = partstatMap[targetPartstat];
+        if (targetValue === undefined) return false;
 
-            // Iterate through ATTENDEE properties to find the current user
-            let prop = comp.get_first_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
-            while (prop) {
-                // Get attendee email
-                let email = prop.get_value_as_string?.() || '';
-                if (email.startsWith('mailto:')) {
-                    email = email.substring(7);
-                }
-                email = email.toLowerCase();
+        // Iterate through ATTENDEE properties to find the current user
+        let prop = comp.get_first_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
+        while (prop) {
+            let email = prop.get_value_as_string?.() || '';
+            if (email.startsWith('mailto:'))
+                email = email.substring(7);
+            email = email.toLowerCase();
 
-                // Check if this is the current user's attendee entry
-                if (email === accountEmail) {
-                    // Get PARTSTAT parameter
-                    const param = prop.get_first_parameter(ICalGLib.ParameterKind.PARTSTAT_PARAMETER);
-                    if (param) {
-                        const partstat = param.get_partstat?.();
-                        return partstat === targetValue;
-                    }
-                    // No PARTSTAT found for this attendee
-                    return false;
-                }
-
-                prop = comp.get_next_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
+            if (email === accountEmail) {
+                const param = prop.get_first_parameter(ICalGLib.ParameterKind.PARTSTAT_PARAMETER);
+                return param ? param.get_partstat?.() === targetValue : false;
             }
 
-            // Current user is not an attendee (might be organizer-only or local event)
-            return false;
-        } catch (e) {
-            return false;
+            prop = comp.get_next_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
         }
+
+        return false;
     }
 
     // Check if an event is declined by the current user
     _isDeclinedEvent(event) {
-        try {
-            if (!event) return false;
+        if (!event) return false;
 
-            // Check if current user (calendar account owner) has DECLINED status
-            if (this._hasCurrentUserPartstat(event, 'DECLINED')) {
-                return true;
-            }
+        if (this._hasCurrentUserPartstat(event, 'DECLINED'))
+            return true;
 
-            // Fallback: check if the event summary contains declined indicators
-            const title = this._getEventTitle(event).toLowerCase();
-            if (title.includes('declined:') || title.includes('rejected:')) {
-                return true;
-            }
-
-            return false;
-        } catch (e) {
-            return false;
-        }
+        const title = this._getEventTitle(event).toLowerCase();
+        return title.includes('declined:') || title.includes('rejected:');
     }
 
     // Check if an event is tentative for the current user
     _isTentativeEvent(event) {
-        try {
-            if (!event) return false;
+        if (!event) return false;
 
-            // Check if current user (calendar account owner) has TENTATIVE status
-            if (this._hasCurrentUserPartstat(event, 'TENTATIVE')) {
-                return true;
-            }
+        if (this._hasCurrentUserPartstat(event, 'TENTATIVE'))
+            return true;
 
-            // Check event-level status (applies to the whole event)
-            if (typeof event.get_status === 'function') {
-                const status = event.get_status();
-                if (status === ICalGLib.PropertyStatus.TENTATIVE) {
-                    return true;
-                }
-            }
-
-            return false;
-        } catch (e) {
-            return false;
-        }
+        return event.get_status?.() === ICalGLib.PropertyStatus.TENTATIVE;
     }
 
     // Check if an event needs a response from the current user
     _isNeedsResponseEvent(event) {
-        try {
-            if (!event) return false;
-
-            // Check if current user (calendar account owner) has NEEDS-ACTION status
-            if (this._hasCurrentUserPartstat(event, 'NEEDS-ACTION')) {
-                return true;
-            }
-
-            return false;
-        } catch (e) {
-            return false;
-        }
+        if (!event) return false;
+        return this._hasCurrentUserPartstat(event, 'NEEDS-ACTION');
     }
 
-    // Extract a string property from an event, handling both direct strings and ICalProperty wrappers
+    // Extract a string property from an event
     _getPropertyString(event, methodName) {
-        try {
-            if (!event || typeof event[methodName] !== 'function') return null;
-            const value = event[methodName]();
-            if (!value) return null;
-            if (typeof value.get_value === 'function') return value.get_value() || null;
-            if (typeof value === 'string') return value || null;
-            return null;
-        } catch (e) {
-            return null;
-        }
+        if (!event) return null;
+        return event[methodName]?.() || null;
     }
 
     // Extract event title
@@ -778,102 +665,71 @@ const ChronomeIndicator = GObject.registerClass({
     _icalTimeToTimestamp(icalTime) {
         if (!icalTime) return 0;
 
-        try {
-            // Get the ICalTime value (might be wrapped in ICalProperty)
-            let timeValue = icalTime;
-            if (typeof icalTime.get_value === 'function') {
-                timeValue = icalTime.get_value();
-            }
-            if (!timeValue) return 0;
+        // Get the ICalTime value (might be wrapped in ICalProperty)
+        const timeValue = icalTime.get_value?.() ?? icalTime;
+        if (!timeValue) return 0;
 
-            // Extract components directly instead of using as_timet().
-            // as_timet() has bugs: it ignores TZID and treats all times as UTC,
-            // causing events to appear on wrong days for non-UTC timezones.
-            const year = typeof timeValue.get_year === 'function' ? timeValue.get_year() : 0;
-            const month = typeof timeValue.get_month === 'function' ? timeValue.get_month() : 1;
-            const day = typeof timeValue.get_day === 'function' ? timeValue.get_day() : 1;
-            const hour = typeof timeValue.get_hour === 'function' ? timeValue.get_hour() : 0;
-            const minute = typeof timeValue.get_minute === 'function' ? timeValue.get_minute() : 0;
-            const second = typeof timeValue.get_second === 'function' ? timeValue.get_second() : 0;
+        // Extract components directly instead of using as_timet().
+        // as_timet() has bugs: it ignores TZID and treats all times as UTC,
+        // causing events to appear on wrong days for non-UTC timezones.
+        const year = timeValue.get_year();
+        const month = timeValue.get_month();
+        const day = timeValue.get_day();
+        const hour = timeValue.get_hour();
+        const minute = timeValue.get_minute();
+        const second = timeValue.get_second();
 
-            // Check if the time is explicitly UTC (e.g., DTSTART:20251220T060000Z)
-            const isUtc = typeof timeValue.is_utc === 'function' && timeValue.is_utc();
-
-            if (isUtc) {
-                return Date.UTC(year, month - 1, day, hour, minute, second);
-            } else {
-                // For all non-UTC times (VALUE=DATE, TZID times, floating times),
-                // interpret components as local time. EDS provides correct
-                // wall-clock components; we just need to interpret them properly.
-                return new Date(year, month - 1, day, hour, minute, second).getTime();
-            }
-        } catch (e) {
-            return 0;
+        // Check if the time is explicitly UTC (e.g., DTSTART:20251220T060000Z)
+        if (timeValue.is_utc?.()) {
+            return Date.UTC(year, month - 1, day, hour, minute, second);
         }
+
+        // For all non-UTC times (VALUE=DATE, TZID times, floating times),
+        // interpret components as local time. EDS provides correct
+        // wall-clock components; we just need to interpret them properly.
+        return new Date(year, month - 1, day, hour, minute, second).getTime();
     }
 
     // Get event start time as timestamp
     // Returns 0 if DTSTART is missing/invalid, allowing filters to skip the event
     _getEventStart(event) {
-        try {
-            if (!event) return 0;
+        if (!event) return 0;
 
-            // Check for instance time from generate_instances (for recurring events)
-            if (event._instanceStart) {
-                return event._instanceStart;
-            }
+        // Check for instance time from generate_instances (for recurring events)
+        if (event._instanceStart) return event._instanceStart;
 
-            // Get start time using ECal 2.0 API
-            if (typeof event.get_dtstart === 'function') {
-                const dtStart = event.get_dtstart();
-                if (dtStart) {
-                    const timestamp = this._icalTimeToTimestamp(dtStart);
-                    if (timestamp > 0) {
-                        return timestamp;
-                    }
-                }
-            }
-
-            // Return 0 for events without valid start time
-            return 0;
-        } catch (e) {
-            return 0;
+        // Get start time using ECal 2.0 API
+        const dtStart = event.get_dtstart();
+        if (dtStart) {
+            const timestamp = this._icalTimeToTimestamp(dtStart);
+            if (timestamp > 0) return timestamp;
         }
+
+        return 0;
     }
 
     // Get event end time as timestamp
     _getEventEnd(event) {
-        try {
-            if (!event) return 0;
+        if (!event) return 0;
 
-            // Check for instance time from generate_instances (for recurring events)
-            if (event._instanceEnd) {
-                return event._instanceEnd;
-            }
+        // Check for instance time from generate_instances (for recurring events)
+        if (event._instanceEnd) return event._instanceEnd;
 
-            // Get end time using ECal 2.0 API
-            if (typeof event.get_dtend === 'function') {
-                const dtEnd = event.get_dtend();
-                if (dtEnd) {
-                    const timestamp = this._icalTimeToTimestamp(dtEnd);
-                    if (timestamp > 0) {
-                        return timestamp;
-                    }
-                }
-            }
-
-            // If no end time, use start time + 1 hour as fallback
-            return this._getEventStart(event) + CONSTANTS.ONE_HOUR_MS;
-        } catch (e) {
-            // Default to start time + 1 hour
-            return this._getEventStart(event) + CONSTANTS.ONE_HOUR_MS;
+        // Get end time using ECal 2.0 API
+        const dtEnd = event.get_dtend();
+        if (dtEnd) {
+            const timestamp = this._icalTimeToTimestamp(dtEnd);
+            if (timestamp > 0) return timestamp;
         }
+
+        // If no end time, use start time + 1 hour as fallback
+        return this._getEventStart(event) + CONSTANTS.ONE_HOUR_MS;
     }
 
     // Async helper: Get or create the SourceRegistry
     _ensureRegistryAsync() {
         return new Promise((resolve, reject) => {
-            if (this._destroyed) {
+            if (!this._cancellable) {
                 resolve(null);
                 return;
             }
@@ -884,12 +740,12 @@ const ChronomeIndicator = GObject.registerClass({
 
             EDataServer.SourceRegistry.new(this._cancellable, (obj, res) => {
                 try {
-                    if (this._destroyed) {
+                    if (!this._cancellable) {
                         resolve(null);
                         return;
                     }
                     const registry = EDataServer.SourceRegistry.new_finish(res);
-                    if (this._destroyed) {
+                    if (!this._cancellable) {
                         resolve(null);
                         return;
                     }
@@ -897,16 +753,12 @@ const ChronomeIndicator = GObject.registerClass({
 
                     // Connect to registry for source changes
                     if (this._registry) {
-                        try {
-                            this._registryChangedSignalId = this._registry.connect('source-changed',
-                                (reg, src) => this._onCalendarSourceChanged(src));
-                            this._registryAddedSignalId = this._registry.connect('source-added',
-                                (reg, src) => this._onCalendarSourceChanged(src));
-                            this._registryRemovedSignalId = this._registry.connect('source-removed',
-                                (reg, src) => this._onCalendarSourceChanged(src));
-                        } catch (e) {
-                            console.error(`Chronome: Failed to connect registry signals: ${e}`);
-                        }
+                        this._registryChangedSignalId = this._registry.connect('source-changed',
+                            (reg, src) => this._onCalendarSourceChanged(src));
+                        this._registryAddedSignalId = this._registry.connect('source-added',
+                            (reg, src) => this._onCalendarSourceChanged(src));
+                        this._registryRemovedSignalId = this._registry.connect('source-removed',
+                            (reg, src) => this._onCalendarSourceChanged(src));
                     }
 
                     resolve(this._registry);
@@ -925,7 +777,7 @@ const ChronomeIndicator = GObject.registerClass({
     // Async helper: Connect to a calendar client
     _connectClientAsync(source, sourceUid) {
         return new Promise((resolve, reject) => {
-            if (this._destroyed) {
+            if (!this._cancellable) {
                 resolve(null);
                 return;
             }
@@ -942,7 +794,7 @@ const ChronomeIndicator = GObject.registerClass({
                 this._cancellable,
                 (obj, res) => {
                     try {
-                        if (this._destroyed) {
+                        if (!this._cancellable) {
                             resolve(null);
                             return;
                         }
@@ -993,8 +845,9 @@ const ChronomeIndicator = GObject.registerClass({
     _generateInstancesAsync(client, startTimet, endTimet, cancellable) {
         return new Promise((resolve, reject) => {
             // Use GLib.idle_add to run the sync operation without blocking shell startup
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                if (this._destroyed) {
+            const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                this._sourceIds?.delete(id);
+                if (!this._cancellable) {
                     resolve([]);
                     return GLib.SOURCE_REMOVE;
                 }
@@ -1010,7 +863,7 @@ const ChronomeIndicator = GObject.registerClass({
                                 startMs: this._icalTimeToTimestamp(instanceStart),
                                 endMs: this._icalTimeToTimestamp(instanceEnd)
                             });
-                            return true; // Continue iteration
+                            return true;
                         }
                     );
                     resolve(instances);
@@ -1019,6 +872,7 @@ const ChronomeIndicator = GObject.registerClass({
                 }
                 return GLib.SOURCE_REMOVE;
             });
+            this._sourceIds?.add(id);
         });
     }
 
@@ -1049,22 +903,20 @@ const ChronomeIndicator = GObject.registerClass({
                 movedToToday: [],
             };
 
-            try {
-                if (this._destroyed) {
-                    resolve(result);
-                    return;
-                }
-                // Use targeted query: fetch recurring events AND detached instances
-                // (has-recurrences? #t) checks for RRULE/RDATE
-                // (contains? "recurrence-id" "") checks for detached instances (exceptions)
-                const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
-                client.get_object_list_as_comps(query, this._cancellable, (obj, res) => {
-                    try {
-                        if (this._destroyed) {
-                            resolve(result);
-                            return;
-                        }
-                        const [success, storedComps] = client.get_object_list_as_comps_finish(res);
+            if (!this._cancellable) {
+                resolve(result);
+                return;
+            }
+
+            // Use targeted query: fetch recurring events AND detached instances
+            const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
+            client.get_object_list_as_comps(query, this._cancellable, (obj, res) => {
+                try {
+                    if (!this._cancellable) {
+                        resolve(result);
+                        return;
+                    }
+                    const [success, storedComps] = client.get_object_list_as_comps_finish(res);
 
                         if (success && storedComps) {
                             for (const comp of storedComps) {
@@ -1130,26 +982,12 @@ const ChronomeIndicator = GObject.registerClass({
                         resolve(result);
                     }
                 });
-            } catch (e) {
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                    resolve(result);
-                    return;
-                }
-                console.error(`Chronome: Error building rescheduled instances map: ${e}`);
-                this._rescheduledCache.set(sourceUid, result);
-                resolve(result);
-            }
-        });
+            });
     }
 
     // Async helper: Query events from a client using generate_instances for proper recurrence expansion
     async _queryEventsAsync(client, sourceUid) {
-        if (!client) {
-            return [];
-        }
-        if (this._destroyed) {
-            return [];
-        }
+        if (!client || !this._cancellable) return [];
 
         // Create date range for today: [midnight today, 23:59:59.999 tonight)
         // Events that overlap with this range are included:
@@ -1280,85 +1118,46 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Find all events from all calendars (async version)
     async _fetchAllEventsAsync() {
+        if (!this._cancellable) return [];
+
+        // Get or create registry (async)
+        const registry = await this._ensureRegistryAsync();
+        if (!registry) return [];
+
+        // Get all calendar sources
+        const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
+        if (!sources || sources.length === 0) return [];
+
+        // Filter to user-selected calendars if specified in settings
+        const enabledCalendars = this._settings.get_strv('enabled-calendars');
+        const filteredSources = enabledCalendars.length > 0
+            ? sources.filter(s => enabledCalendars.includes(s.get_uid()))
+            : sources;
+
+        // Filter to enabled sources
+        const enabledSources = filteredSources.filter(source => source.get_enabled());
+
+        // PHASE 1: Connect to all sources in parallel (to get metadata for deduplication)
+        const connectPromises = enabledSources.map(async (source) => {
+            const client = await this._connectClientAsync(source, source.get_uid());
+            return client ? source : null;
+        });
+        const connectedSources = (await Promise.all(connectPromises)).filter(s => s !== null);
+
+        // PHASE 2: Deduplicate sources by calendar ID (prefer higher privilege)
+        const dedupedSources = deduplicateSources(connectedSources, this._registry, this._calendarReadonly);
+
+        // PHASE 3: Query events only from deduplicated sources
         const events = [];
+        const queryPromises = dedupedSources.map(async (source) => {
+            const client = this._clients.get(source.get_uid());
+            return client ? await this._queryEventsAsync(client, source.get_uid()) : [];
+        });
 
-        try {
-            if (this._destroyed) {
-                return events;
-            }
-            // Verify we have the required libraries
-            if (!ECal || !EDataServer) {
-                return events;
-            }
-
-            // Get or create registry (async)
-            const registry = await this._ensureRegistryAsync();
-            if (!registry) {
-                return events;
-            }
-
-            // Get all calendar sources
-            const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
-            if (!sources || sources.length === 0) {
-                return events;
-            }
-
-            // Filter to user-selected calendars if specified in settings
-            const filteredSources = [];
-            const enabledCalendars = this._settings.get_strv('enabled-calendars');
-
-            if (enabledCalendars.length > 0) {
-                for (const source of sources) {
-                    const uid = source.get_uid();
-                    if (enabledCalendars.includes(uid)) {
-                        filteredSources.push(source);
-                    }
-                }
-            } else {
-                filteredSources.push(...sources);
-            }
-
-            // Filter to enabled sources
-            const enabledSources = filteredSources.filter(source => source.get_enabled());
-
-            // PHASE 1: Connect to all sources in parallel (to get metadata for deduplication)
-            const connectPromises = enabledSources.map(async (source) => {
-                const sourceUid = source.get_uid();
-                try {
-                    const client = await this._connectClientAsync(source, sourceUid);
-                    return client ? source : null;
-                } catch (e) {
-                    return null;
-                }
-            });
-
-            const connectedSources = (await Promise.all(connectPromises)).filter(s => s !== null);
-
-            // PHASE 2: Deduplicate sources by calendar ID (prefer higher privilege)
-            const dedupedSources = deduplicateSources(connectedSources, this._registry, this._calendarReadonly);
-
-            // PHASE 3: Query events only from deduplicated sources
-            const queryPromises = dedupedSources.map(async (source) => {
-                const sourceUid = source.get_uid();
-                try {
-                    const client = this._clients.get(sourceUid);
-                    if (client) {
-                        return await this._queryEventsAsync(client, sourceUid);
-                    }
-                    return [];
-                } catch (e) {
-                    return [];
-                }
-            });
-
-            const results = await Promise.all(queryPromises);
-            for (const comps of results) {
-                events.push(...comps);
-            }
-        } catch (e) {
-            console.error(`Chronome: Error fetching events: ${e}`);
+        const results = await Promise.all(queryPromises);
+        for (const comps of results) {
+            events.push(...comps);
         }
-
         return events;
     }
 
@@ -1383,27 +1182,30 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     // Find a video conferencing link in an event
+    // Searches location first, then description, to avoid unnecessary regex runs
     _findVideoLink(event) {
         if (!event) return null;
 
-        const searchTexts = [];
-
         const location = this._getPropertyString(event, 'get_location');
-        if (location) searchTexts.push(location);
-
-        const description = this._getPropertyString(event, 'get_description');
-        if (description) searchTexts.push(description);
-
-        if (searchTexts.length === 0 && typeof event.get_as_string === 'function') {
-            searchTexts.push(event.get_as_string() || '');
+        if (location) {
+            const url = findMeetingUrl(location);
+            if (url) return url;
         }
 
-        return findMeetingUrl(searchTexts.join(' '));
+        const description = this._getPropertyString(event, 'get_description');
+        if (description) {
+            const url = findMeetingUrl(description);
+            if (url) return url;
+        }
+
+        // Last resort: search raw iCal string
+        const icalStr = event.get_as_string?.() || '';
+        return icalStr ? findMeetingUrl(icalStr) : null;
     }
 
     // Set up ECalClientView for receiving calendar change notifications (async version)
     _setupClientViewAsync(client, sourceUid) {
-        if (!client || this._destroyed) return;
+        if (!client || !this._cancellable) return;
 
         // Initialize views map if needed
         if (!this._clientViews) {
@@ -1413,38 +1215,19 @@ const ChronomeIndicator = GObject.registerClass({
         // Create a view to monitor all events (async)
         client.get_view('#t', this._cancellable, (obj, res) => {
             try {
-                if (this._destroyed) {
-                    return;
-                }
+                if (!this._cancellable) return;
                 const [success, view] = client.get_view_finish(res);
 
                 if (success && view) {
-                    const signals = [];
-
                     // Create bound handler that includes sourceUid for cache invalidation
                     const boundHandler = () => this._onCalendarObjectsChanged(sourceUid);
 
                     // Connect to view signals
-                    try {
-                        const addedId = view.connect('objects-added', boundHandler);
-                        signals.push({ id: addedId, obj: view });
-                    } catch (e) {
-                        console.error(`Chronome: Failed to connect objects-added signal: ${e}`);
-                    }
-
-                    try {
-                        const modifiedId = view.connect('objects-modified', boundHandler);
-                        signals.push({ id: modifiedId, obj: view });
-                    } catch (e) {
-                        console.error(`Chronome: Failed to connect objects-modified signal: ${e}`);
-                    }
-
-                    try {
-                        const removedId = view.connect('objects-removed', boundHandler);
-                        signals.push({ id: removedId, obj: view });
-                    } catch (e) {
-                        console.error(`Chronome: Failed to connect objects-removed signal: ${e}`);
-                    }
+                    const signals = [
+                        { id: view.connect('objects-added', boundHandler), obj: view },
+                        { id: view.connect('objects-modified', boundHandler), obj: view },
+                        { id: view.connect('objects-removed', boundHandler), obj: view },
+                    ];
 
                     // Store view and signals for cleanup
                     this._clientViews.set(sourceUid, { view, signals });
@@ -1463,9 +1246,7 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Debounced refresh - prevents refresh storms from rapid signal emissions
     _debouncedRefresh() {
-        if (this._destroyed) {
-            return;
-        }
+        if (!this._cancellable) return;
         if (this._refreshDebounceId) {
             GLib.Source.remove(this._refreshDebounceId);
         }
@@ -1520,13 +1301,7 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Disconnect all signals
     _disconnectSignals() {
-        // Cancel any pending debounced refresh
-        if (this._refreshDebounceId) {
-            GLib.Source.remove(this._refreshDebounceId);
-            this._refreshDebounceId = null;
-        }
-
-        // Disconnect settings signals (consolidated)
+        // Disconnect settings signals
         if (this._settings && this._settingsSignals) {
             for (const id of this._settingsSignals) {
                 try { this._settings.disconnect(id); } catch (e) { /* ignore */ }
@@ -1589,17 +1364,28 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     destroy() {
-        // Mark as destroyed to prevent post-destroy callbacks
-        this._destroyed = true;
-
-        // Disconnect all signals
-        this._disconnectSignals();
-
-        // Cancel any pending async operations
+        // Cancel async operations first (null cancellable serves as destroyed flag)
         if (this._cancellable) {
             this._cancellable.cancel();
             this._cancellable = null;
         }
+
+        // Remove all main loop sources
+        this.stopTimer();
+        if (this._refreshDebounceId) {
+            GLib.Source.remove(this._refreshDebounceId);
+            this._refreshDebounceId = null;
+        }
+        if (this._sourceIds) {
+            for (const id of this._sourceIds) {
+                GLib.Source.remove(id);
+            }
+            this._sourceIds.clear();
+            this._sourceIds = null;
+        }
+
+        // Disconnect all signals
+        this._disconnectSignals();
 
         // Clear views
         if (this._clientViews) {
@@ -1607,49 +1393,25 @@ const ChronomeIndicator = GObject.registerClass({
             this._clientViews = null;
         }
 
-        // Clear client cache - ECal.Client objects are properly garbage collected
-        // in GJS when references are released. No explicit close() needed.
-        if (this._clients) {
-            this._clients.clear();
-            this._clients = null;
-        }
+        // Clear client cache
+        this._clients?.clear();
+        this._clients = null;
 
-        // Clear account emails cache
-        if (this._accountEmails) {
-            this._accountEmails.clear();
-            this._accountEmails = null;
-        }
+        // Clear metadata caches
+        this._accountEmails?.clear();
+        this._accountEmails = null;
+        this._calendarIds?.clear();
+        this._calendarIds = null;
+        this._calendarReadonly?.clear();
+        this._calendarReadonly = null;
+        this._calendarColors?.clear();
+        this._calendarColors = null;
+        this._rescheduledCache?.clear();
+        this._rescheduledCache = null;
 
-        // Clear calendar metadata caches
-        if (this._calendarIds) {
-            this._calendarIds.clear();
-            this._calendarIds = null;
-        }
-        if (this._calendarReadonly) {
-            this._calendarReadonly.clear();
-            this._calendarReadonly = null;
-        }
-        if (this._calendarColors) {
-            this._calendarColors.clear();
-            this._calendarColors = null;
-        }
-
-        // Clear rescheduled instances cache
-        if (this._rescheduledCache) {
-            this._rescheduledCache.clear();
-            this._rescheduledCache = null;
-        }
-
-        // Clear registry
         this._registry = null;
-
-        // Clear settings reference
         this._settings = null;
 
-        // Stop refresh timer
-        this.stopTimer();
-
-        // Call parent destroy
         super.destroy();
     }
 });
@@ -1662,42 +1424,17 @@ export default class ChronomeExtension extends Extension {
     }
 
     enable() {
-        // Initialize settings
         this._settings = this.getSettings();
-
-        // Load CSS
-        const theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
-        if (theme) {
-            this._stylesheetFile = Gio.File.new_for_path(this.path + '/stylesheet.css');
-            theme.load_stylesheet(this._stylesheetFile);
-        }
-
-        // Create the indicator
         this._chronomeIndicator = new ChronomeIndicator(this, this._settings);
-
-        // Add to panel (right side)
         Main.panel.addToStatusArea('chronome-indicator', this._chronomeIndicator);
-
-        // Start refresh timer
         this._chronomeIndicator.startTimer();
     }
 
     disable() {
-        // Unload CSS
-        const theme = St.ThemeContext.get_for_stage(global.stage).get_theme();
-        if (theme && this._stylesheetFile) {
-            theme.unload_stylesheet(this._stylesheetFile);
-            this._stylesheetFile = null;
-        }
-
-        // Stop and destroy indicator
         if (this._chronomeIndicator) {
-            this._chronomeIndicator.stopTimer();
             this._chronomeIndicator.destroy();
             this._chronomeIndicator = null;
         }
-
-        // Clean up settings
         this._settings = null;
     }
 }
