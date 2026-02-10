@@ -287,7 +287,8 @@ import {functionName} from './lib/moduleName.js';
 
 ### Error Handling
 
-- Wrap EDS operations in try/catch
+- Only use try/catch around EDS async `*_finish()` callbacks that genuinely throw GError
+- Do NOT use try-catch around property getters, signal connections, or pure computations
 - Use `console.debug()` for non-critical warnings
 - Use `console.error()` for actual errors
 - Silent failures for operations that commonly fail (calendar sync not supported)
@@ -296,12 +297,12 @@ import {functionName} from './lib/moduleName.js';
 
 ### Async Safety
 
-1. **Check `_destroyed` flag**: Always check `if (this._destroyed) return;` at the start of async callbacks to prevent post-destruction updates
+1. **Check cancellable**: Always check `if (!this._cancellable) return;` at the start of async callbacks to prevent post-destruction updates. The cancellable is set to null in `destroy()` and serves as the destroyed flag.
 
 2. **Callback wrapping**: EDS async operations use callbacks, not Promises. The extension wraps them:
    ```javascript
-   client.refresh(null, (obj, res) => {
-       if (this._destroyed) return;  // CRITICAL
+   client.refresh(this._cancellable, (obj, res) => {
+       if (!this._cancellable) return;  // CRITICAL: extension may be destroyed
        try { obj.refresh_finish(res); } catch (e) { ... }
    });
    ```
@@ -309,12 +310,16 @@ import {functionName} from './lib/moduleName.js';
 ### GLib Timer Management
 
 - Use `GLib.timeout_add_seconds()` not `setTimeout()`
-- Always store timer ID and remove in `destroy()`:
+- ALL GLib sources (timeout_add, idle_add) must be removed when the extension is disabled
+- Named timers (fetch, display, debounce) are tracked individually and removed in `destroy()`
+- Fire-and-forget sources use `this._sourceIds` Set for tracking:
   ```javascript
-  if (this._fetchTimeout) {
-      GLib.Source.remove(this._fetchTimeout);
-      this._fetchTimeout = null;
-  }
+  const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+      this._sourceIds?.delete(id);
+      // ... callback logic ...
+      return GLib.SOURCE_REMOVE;
+  });
+  this._sourceIds?.add(id);
   ```
 
 ### Blocking Operations
