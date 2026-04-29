@@ -174,6 +174,24 @@ describe('isAllDayEventHeuristic', function() {
         expect(isAllDayEventHeuristic(1000, null)).toBeFalsy();
         expect(isAllDayEventHeuristic(null, null)).toBeFalsy();
     });
+
+    it('should flag exactly 24 hours starting at midnight as all-day', function() {
+        const midnight = new Date(2025, 0, 1, 0, 0, 0).getTime();
+        const plus24 = midnight + 24 * 60 * 60 * 1000;
+        expect(isAllDayEventHeuristic(midnight, plus24)).toBeTruthy();
+    });
+
+    it('should flag exactly 48 hours starting at midnight as all-day', function() {
+        const midnight = new Date(2025, 0, 1, 0, 0, 0).getTime();
+        const plus48 = midnight + 48 * 60 * 60 * 1000;
+        expect(isAllDayEventHeuristic(midnight, plus48)).toBeTruthy();
+    });
+
+    it('should NOT flag exactly 23 hours as all-day', function() {
+        const midnight = new Date(2025, 0, 1, 0, 0, 0).getTime();
+        const plus23 = midnight + 23 * 60 * 60 * 1000;
+        expect(isAllDayEventHeuristic(midnight, plus23)).toBeFalsy();
+    });
 });
 
 describe('getNextMeeting', function() {

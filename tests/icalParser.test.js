@@ -122,6 +122,21 @@ END:VEVENT`;
         expect(result).not.toBeNull();
         expect(result.timestampMs).toBeGreaterThan(0);
     });
+
+    it('should parse Feb 29 on a leap year (2024) correctly', function() {
+        const ical = 'DTSTART:20240229T120000Z';
+        const result = parseIcalDateTime(ical, 'DTSTART');
+        expect(result).not.toBeNull();
+        expect(result.isDateOnly).toBeFalsy();
+        expect(result.timestampMs).toBe(Date.UTC(2024, 1, 29, 12, 0, 0));
+    });
+
+    it('should parse Feb 29 date-only on a leap year (2024) correctly', function() {
+        const ical = 'DTSTART;VALUE=DATE:20240229';
+        const result = parseIcalDateTime(ical, 'DTSTART');
+        expect(result).not.toBeNull();
+        expect(result.isDateOnly).toBeTruthy();
+    });
 });
 
 describe('extractIcalDateString', function() {

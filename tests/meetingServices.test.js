@@ -160,6 +160,111 @@ describe('findMeetingUrl', function() {
         expect(result).toContain('streamyard.com');
     });
 
+    // RingCentral
+    it('should find RingCentral URLs', function() {
+        const result = findMeetingUrl('https://meetings.ringcentral.com/j/1234567890');
+        expect(result).not.toBeNull();
+        expect(result).toContain('ringcentral.com');
+    });
+
+    // 8x8
+    it('should find 8x8 URLs', function() {
+        const result = findMeetingUrl('https://8x8.vc/company/room');
+        expect(result).not.toBeNull();
+        expect(result).toContain('8x8.vc');
+    });
+
+    // Demio
+    it('should find Demio URLs', function() {
+        const result = findMeetingUrl('https://event.demio.com/anon/webinar-abc123');
+        expect(result).not.toBeNull();
+        expect(result).toContain('event.demio.com');
+    });
+
+    // Luma
+    it('should find Luma URLs', function() {
+        const result = findMeetingUrl('https://lu.ma/join/abcdef');
+        expect(result).not.toBeNull();
+        expect(result).toContain('lu.ma');
+    });
+
+    // Gather
+    it('should find Gather URLs', function() {
+        const result = findMeetingUrl('https://app.gather.town/app/ABC123/my-room?spawnToken=xyz');
+        expect(result).not.toBeNull();
+        expect(result).toContain('gather.town');
+    });
+
+    // LiveKit
+    it('should find LiveKit URLs', function() {
+        const result = findMeetingUrl('https://meet.livekit.io/rooms/abc-123-xyz');
+        expect(result).not.toBeNull();
+        expect(result).toContain('livekit.io');
+    });
+
+    // Cal.com
+    it('should find Cal.com video URLs', function() {
+        const result = findMeetingUrl('https://app.cal.com/video/abc123xyz');
+        expect(result).not.toBeNull();
+        expect(result).toContain('cal.com/video');
+    });
+
+    // Pumble
+    it('should find Pumble URLs', function() {
+        const result = findMeetingUrl('https://meet.pumble.com/my-meeting-room');
+        expect(result).not.toBeNull();
+        expect(result).toContain('meet.pumble.com');
+    });
+
+    // Doxy.me
+    it('should find Doxy.me URLs', function() {
+        const result = findMeetingUrl('https://doxy.me/drsmith');
+        expect(result).not.toBeNull();
+        expect(result).toContain('doxy.me');
+    });
+
+    // Vowel
+    it('should find Vowel URLs', function() {
+        const result = findMeetingUrl('https://vowel.com/#/g/meeting-abc123');
+        expect(result).not.toBeNull();
+        expect(result).toContain('vowel.com');
+    });
+
+    // GoToWebinar
+    it('should find GoToWebinar URLs', function() {
+        const result = findMeetingUrl('https://gotowebinar.com/join/123456789');
+        expect(result).not.toBeNull();
+        expect(result).toContain('gotowebinar.com');
+    });
+
+    // Join.me
+    it('should find Join.me URLs', function() {
+        const result = findMeetingUrl('https://join.me/my-meeting');
+        expect(result).not.toBeNull();
+        expect(result).toContain('join.me');
+    });
+
+    // UberConference
+    it('should find UberConference URLs', function() {
+        const result = findMeetingUrl('https://uberconference.com/john-doe');
+        expect(result).not.toBeNull();
+        expect(result).toContain('uberconference.com');
+    });
+
+    // Lark
+    it('should find Lark URLs', function() {
+        const result = findMeetingUrl('https://vc.larksuite.com/j/1234567890');
+        expect(result).not.toBeNull();
+        expect(result).toContain('larksuite.com');
+    });
+
+    // Feishu
+    it('should find Feishu URLs', function() {
+        const result = findMeetingUrl('https://vc.feishu.cn/j/1234567890');
+        expect(result).not.toBeNull();
+        expect(result).toContain('feishu.cn');
+    });
+
     // Edge cases
     it('should return null for text without meeting URLs', function() {
         expect(findMeetingUrl('No meeting link here')).toBeNull();
