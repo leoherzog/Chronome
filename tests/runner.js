@@ -157,9 +157,19 @@ export function expect(actual) {
                     throw new Error(`Expected ${JSON.stringify(actual)} not to be ${JSON.stringify(expected)}`);
                 }
             },
+            toEqual(expected) {
+                if (JSON.stringify(actual) === JSON.stringify(expected)) {
+                    throw new Error(`Expected ${JSON.stringify(actual)} not to equal ${JSON.stringify(expected)}`);
+                }
+            },
             toBeNull() {
                 if (actual === null) {
                     throw new Error('Expected non-null value');
+                }
+            },
+            toBeUndefined() {
+                if (actual === undefined) {
+                    throw new Error('Expected defined value');
                 }
             },
             toBeTruthy() {
@@ -167,11 +177,68 @@ export function expect(actual) {
                     throw new Error(`Expected falsy value, got ${JSON.stringify(actual)}`);
                 }
             },
+            toBeFalsy() {
+                if (!actual) {
+                    throw new Error(`Expected truthy value, got ${JSON.stringify(actual)}`);
+                }
+            },
             toContain(expected) {
                 if (typeof actual === 'string' && actual.includes(expected)) {
                     throw new Error(`Expected "${actual}" not to contain "${expected}"`);
                 } else if (Array.isArray(actual) && actual.includes(expected)) {
                     throw new Error(`Expected array not to contain ${JSON.stringify(expected)}`);
+                }
+            },
+            toMatch(regex) {
+                if (regex.test(actual)) {
+                    throw new Error(`Expected "${actual}" not to match ${regex}`);
+                }
+            },
+            toBeGreaterThan(expected) {
+                if (actual > expected) {
+                    throw new Error(`Expected ${actual} not > ${expected}`);
+                }
+            },
+            toBeGreaterThanOrEqual(expected) {
+                if (actual >= expected) {
+                    throw new Error(`Expected ${actual} not >= ${expected}`);
+                }
+            },
+            toBeLessThan(expected) {
+                if (actual < expected) {
+                    throw new Error(`Expected ${actual} not < ${expected}`);
+                }
+            },
+            toBeLessThanOrEqual(expected) {
+                if (actual <= expected) {
+                    throw new Error(`Expected ${actual} not <= ${expected}`);
+                }
+            },
+            toHaveLength(expected) {
+                if (actual?.length === expected) {
+                    throw new Error(`Expected length not to be ${expected}`);
+                }
+            },
+            toThrow(expectedMessage) {
+                if (typeof actual !== 'function') {
+                    throw new Error('toThrow requires a function');
+                }
+                let threw = false;
+                let thrownError = null;
+                try {
+                    actual();
+                } catch (e) {
+                    threw = true;
+                    thrownError = e;
+                }
+                if (threw) {
+                    if (expectedMessage) {
+                        if (thrownError.message?.includes(expectedMessage)) {
+                            throw new Error(`Expected function not to throw error containing "${expectedMessage}"`);
+                        }
+                    } else {
+                        throw new Error(`Expected function not to throw, but it threw: ${thrownError.message}`);
+                    }
                 }
             },
         },

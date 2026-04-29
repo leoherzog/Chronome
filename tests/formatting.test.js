@@ -119,6 +119,28 @@ describe('formatTime', function() {
     it('should default to 12-hour format', function() {
         expect(formatTime(new Date(2025, 0, 1, 14, 30))).toBe('2:30 PM');
     });
+
+    // DST transitions - assert format structure, not specific hour values,
+    // so the test is robust to potential toLocaleTimeString-based impls.
+    it('should produce valid 12h format during spring-forward DST transition', function() {
+        const springForward = new Date('2025-03-09T07:30:00Z');
+        expect(formatTime(springForward, false)).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+    });
+
+    it('should produce valid 24h format during spring-forward DST transition', function() {
+        const springForward = new Date('2025-03-09T07:30:00Z');
+        expect(formatTime(springForward, true)).toMatch(/^\d{2}:\d{2}$/);
+    });
+
+    it('should produce valid 12h format during fall-back DST transition', function() {
+        const fallBack = new Date('2025-11-02T06:30:00Z');
+        expect(formatTime(fallBack, false)).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+    });
+
+    it('should produce valid 24h format during fall-back DST transition', function() {
+        const fallBack = new Date('2025-11-02T06:30:00Z');
+        expect(formatTime(fallBack, true)).toMatch(/^\d{2}:\d{2}$/);
+    });
 });
 
 describe('formatTimeRange', function() {

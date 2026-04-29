@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<schemalist>
+<schemalist gettext-domain="chronome">
   <schema id="org.gnome.shell.extensions.chronome" path="/org/gnome/shell/extensions/chronome/">
     <key name="refresh-interval" type="i">
       <default>60</default>
@@ -26,6 +26,7 @@
 
     <key name="event-title-length" type="i">
       <default>30</default>
+      <range min="10" max="100"/>
       <summary>Maximum event title length</summary>
       <description>Maximum length of event titles in the panel display</description>
     </key>

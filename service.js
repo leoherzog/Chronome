@@ -19,6 +19,13 @@ import {deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHe
 import {ONE_HOUR_MS} from './lib/constants.js';
 import {findMeetingUrl} from './lib/meetingServices.js';
 
+Gio._promisify(ECal.Client, 'connect', 'connect_finish');
+Gio._promisify(ECal.Client.prototype, 'refresh', 'refresh_finish');
+Gio._promisify(ECal.Client.prototype, 'get_object_list_as_comps', 'get_object_list_as_comps_finish');
+Gio._promisify(ECal.Client.prototype, 'get_view', 'get_view_finish');
+Gio._promisify(EDataServer.SourceRegistry, 'new', 'new_finish');
+Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
+
 // D-Bus interface
 const DBUS_NAME = 'tech.herzog.Chronome1';
 const DBUS_PATH = '/tech/herzog/Chronome';
@@ -69,17 +76,21 @@ class ChronomeService {
         this._refreshDebounceId = null;
         this._cancellable = new Gio.Cancellable();
         this._sourceIds = new Set();
+        this._shuttingDown = false;
 
         // Last computed JSON payload
         this._lastJson = '{"nextMeeting":null,"events":[]}';
 
         // D-Bus registration
-        this._dbusConnection = null;
-        this._dbusRegId = 0;
+        this._exportedObject = null;
         this._nameOwnerId = 0;
 
         // Refresh timer
         this._fetchTimeout = null;
+
+        // Signal source IDs
+        this._sigtermSourceId = 0;
+        this._sigintSourceId = 0;
 
         // Settings signals
         this._settingsSignals = [];
@@ -88,7 +99,7 @@ class ChronomeService {
             this._settingsSignals.push(
                 this._settings.connect(`changed::${key}`, () => {
                     if (key === 'refresh-interval')
-                        this._restartFetchTimer();
+                        this._startFetchTimer();
                     else
                         this._refreshEvents();
                 })
@@ -97,6 +108,8 @@ class ChronomeService {
     }
 
     start() {
+        this._loop = new GLib.MainLoop(null, false);
+
         this._nameOwnerId = Gio.bus_own_name(
             Gio.BusType.SESSION,
             DBUS_NAME,
@@ -111,34 +124,57 @@ class ChronomeService {
 
         this._startFetchTimer();
         this._refreshEvents();
+        this._watchParent();
 
-        this._loop = new GLib.MainLoop(null, false);
-
-        // Handle SIGTERM/SIGINT for clean shutdown
         const onSignal = () => {
             this._shutdown();
             return GLib.SOURCE_REMOVE;
         };
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15 /* SIGTERM */, onSignal);
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 2 /* SIGINT */, onSignal);
+        this._sigtermSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15 /* SIGTERM */, onSignal);
+        this._sigintSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 2 /* SIGINT */, onSignal);
 
         this._loop.run();
+    }
+
+    _watchParent() {
+        this._stdinStream ??= Gio.UnixInputStream.new(0, false);
+        this._stdinStream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, this._cancellable)
+            .then(bytes => {
+                if (this._shuttingDown) return;
+                if (!bytes || bytes.get_size() === 0) {
+                    this._shutdown();
+                    return;
+                }
+                this._watchParent();
+            })
+            .catch(e => {
+                if (this._shuttingDown) return;
+                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                this._shutdown();
+            });
     }
 
     _shutdown() {
         if (this._shuttingDown) return;
         this._shuttingDown = true;
 
-        if (this._cancellable) {
-            this._cancellable.cancel();
-            this._cancellable = null;
-        }
+        this._cancellable.cancel();
+        this._cancellable = null;
 
         this._stopFetchTimer();
 
         if (this._refreshDebounceId) {
             GLib.Source.remove(this._refreshDebounceId);
             this._refreshDebounceId = null;
+        }
+
+        if (this._sigtermSourceId) {
+            GLib.Source.remove(this._sigtermSourceId);
+            this._sigtermSourceId = 0;
+        }
+        if (this._sigintSourceId) {
+            GLib.Source.remove(this._sigintSourceId);
+            this._sigintSourceId = 0;
         }
 
         if (this._sourceIds) {
@@ -148,24 +184,19 @@ class ChronomeService {
             this._sourceIds = null;
         }
 
-        // Disconnect settings signals
         if (this._settings && this._settingsSignals) {
-            for (const id of this._settingsSignals) {
-                try { this._settings.disconnect(id); } catch (_e) { /* ignore */ }
-            }
+            for (const id of this._settingsSignals)
+                this._settings.disconnect(id);
             this._settingsSignals = null;
         }
 
-        // Disconnect EDS signals
         this._disconnectEdsSignals();
 
-        // Disconnect views
         if (this._clientViews) {
             for (const [, viewData] of this._clientViews.entries()) {
-                try { viewData.view?.stop(); } catch (_e) { /* ignore */ }
-                for (const sig of viewData.signals || []) {
-                    try { sig.obj?.disconnect(sig.id); } catch (_e) { /* ignore */ }
-                }
+                viewData.view.stop();
+                for (const sig of viewData.signals || [])
+                    sig.obj.disconnect(sig.id);
             }
             this._clientViews.clear();
         }
@@ -176,9 +207,9 @@ class ChronomeService {
         this._calendarColors?.clear();
         this._rescheduledCache?.clear();
 
-        if (this._dbusRegId && this._dbusConnection) {
-            this._dbusConnection.unregister_object(this._dbusRegId);
-            this._dbusRegId = 0;
+        if (this._exportedObject) {
+            this._exportedObject.unexport();
+            this._exportedObject = null;
         }
 
         if (this._nameOwnerId) {
@@ -192,15 +223,15 @@ class ChronomeService {
     _disconnectEdsSignals() {
         if (this._registry) {
             if (this._registryChangedSignalId) {
-                try { this._registry.disconnect(this._registryChangedSignalId); } catch (_e) { /* ignore */ }
+                this._registry.disconnect(this._registryChangedSignalId);
                 this._registryChangedSignalId = null;
             }
             if (this._registryAddedSignalId) {
-                try { this._registry.disconnect(this._registryAddedSignalId); } catch (_e) { /* ignore */ }
+                this._registry.disconnect(this._registryAddedSignalId);
                 this._registryAddedSignalId = null;
             }
             if (this._registryRemovedSignalId) {
-                try { this._registry.disconnect(this._registryRemovedSignalId); } catch (_e) { /* ignore */ }
+                this._registry.disconnect(this._registryRemovedSignalId);
                 this._registryRemovedSignalId = null;
             }
         }
@@ -209,39 +240,26 @@ class ChronomeService {
     // --- D-Bus ---
 
     _onBusAcquired(connection) {
-        this._dbusConnection = connection;
-        const nodeInfo = Gio.DBusNodeInfo.new_for_xml(DBUS_IFACE);
-        this._dbusRegId = connection.register_object(
-            DBUS_PATH,
-            nodeInfo.interfaces[0],
-            (conn, sender, path, iface, method, params, invocation) => {
-                this._handleMethodCall(method, params, invocation);
-            },
-            null, null
-        );
+        this._exportedObject = Gio.DBusExportedObject.wrapJSObject(DBUS_IFACE, this);
+        this._exportedObject.export(connection, DBUS_PATH);
     }
 
-    _handleMethodCall(method, _params, invocation) {
-        if (method === 'GetEvents') {
-            invocation.return_value(new GLib.Variant('(s)', [this._lastJson]));
-        } else if (method === 'Refresh') {
-            this._syncCalendars();
-            this._refreshEvents();
-            invocation.return_value(null);
-        } else if (method === 'Ping') {
-            invocation.return_value(new GLib.Variant('(b)', [true]));
-        } else {
-            invocation.return_dbus_error('org.freedesktop.DBus.Error.UnknownMethod',
-                `Unknown method: ${method}`);
-        }
+    GetEvents() {
+        return this._lastJson;
+    }
+
+    Refresh() {
+        this._syncCalendars();
+        this._refreshEvents();
+    }
+
+    Ping() {
+        return true;
     }
 
     _emitEventsChanged(json) {
-        if (!this._dbusConnection) return;
-        this._dbusConnection.emit_signal(
-            null, DBUS_PATH, DBUS_NAME, 'EventsChanged',
-            new GLib.Variant('(s)', [json])
-        );
+        if (!this._exportedObject) return;
+        this._exportedObject.emit_signal('EventsChanged', new GLib.Variant('(s)', [json]));
     }
 
     // --- Timers ---
@@ -262,14 +280,10 @@ class ChronomeService {
         }
     }
 
-    _restartFetchTimer() {
-        this._startFetchTimer();
-    }
-
     // --- Refresh pipeline ---
 
     _refreshEvents() {
-        if (!this._cancellable) return;
+        if (this._shuttingDown) return;
 
         if (this._refreshInProgress) {
             this._pendingRefresh = true;
@@ -280,7 +294,7 @@ class ChronomeService {
         this._pendingRefresh = false;
 
         this._fetchAllEventsAsync().then(allEvents => {
-            if (!this._cancellable) return;
+            if (this._shuttingDown) return;
 
             const json = this._computeEventData(allEvents);
             this._lastJson = json;
@@ -290,10 +304,10 @@ class ChronomeService {
         }).finally(() => {
             this._refreshInProgress = false;
 
-            if (this._pendingRefresh && this._cancellable) {
+            if (this._pendingRefresh && !this._shuttingDown) {
                 const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                     this._sourceIds?.delete(id);
-                    if (this._cancellable) this._refreshEvents();
+                    if (!this._shuttingDown) this._refreshEvents();
                     return GLib.SOURCE_REMOVE;
                 });
                 this._sourceIds?.add(id);
@@ -352,7 +366,7 @@ class ChronomeService {
         const clients = Array.from(this._clients.values());
 
         for (const client of clients) {
-            if (!this._cancellable) return;
+            if (this._shuttingDown) return;
 
             await new Promise(r => {
                 const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.SYNC_DELAY_MS, () => {
@@ -363,17 +377,15 @@ class ChronomeService {
                 this._sourceIds?.add(id);
             });
 
-            if (!this._cancellable) return;
+            if (this._shuttingDown) return;
 
-            client.refresh(this._cancellable, (obj, res) => {
-                if (!this._cancellable) return;
-                try {
-                    obj.refresh_finish(res);
-                } catch (e) {
-                    if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED))
-                        console.debug(`Chronome service: Calendar sync failed: ${e.message}`);
-                }
-            });
+            try {
+                await client.refresh(this._cancellable);
+            } catch (e) {
+                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED))
+                    console.debug(`Chronome service: Calendar sync failed: ${e.message}`);
+            }
         }
     }
 
@@ -453,9 +465,9 @@ class ChronomeService {
     }
 
     _icalTimeToTimestamp(icalTime) {
-        if (!icalTime) return 0;
+        if (!icalTime) return null;
         const timeValue = icalTime.get_value?.() ?? icalTime;
-        if (!timeValue) return 0;
+        if (!timeValue) return null;
 
         const year = timeValue.get_year();
         const month = timeValue.get_month();
@@ -467,7 +479,16 @@ class ChronomeService {
         if (timeValue.is_utc?.())
             return Date.UTC(year, month - 1, day, hour, minute, second);
 
-        return new Date(year, month - 1, day, hour, minute, second).getTime();
+        let tz;
+        const tzid = timeValue.get_tzid?.();
+        if (tzid)
+            tz = GLib.TimeZone.new(tzid);
+        else
+            tz = GLib.TimeZone.new_local();
+
+        const dateTime = GLib.DateTime.new(tz, year, month, day, hour, minute, second);
+        if (!dateTime) return null;
+        return dateTime.to_unix() * 1000;
     }
 
     _getEventStart(event) {
@@ -510,85 +531,67 @@ class ChronomeService {
 
     // --- EDS pipeline (ported from extension.js) ---
 
-    _ensureRegistryAsync() {
-        return new Promise((resolve, reject) => {
-            if (!this._cancellable) { resolve(null); return; }
-            if (this._registry) { resolve(this._registry); return; }
+    async _ensureRegistryAsync() {
+        if (this._shuttingDown) return null;
+        if (this._registry) return this._registry;
 
-            EDataServer.SourceRegistry.new(this._cancellable, (obj, res) => {
-                try {
-                    if (!this._cancellable) { resolve(null); return; }
-                    const registry = EDataServer.SourceRegistry.new_finish(res);
-                    if (!this._cancellable) { resolve(null); return; }
-                    this._registry = registry;
+        try {
+            const registry = await EDataServer.SourceRegistry.new(this._cancellable);
+            if (this._shuttingDown) return null;
+            this._registry = registry;
 
-                    if (this._registry) {
-                        this._registryChangedSignalId = this._registry.connect('source-changed',
-                            (_reg, src) => this._onCalendarSourceChanged(src));
-                        this._registryAddedSignalId = this._registry.connect('source-added',
-                            (_reg, src) => this._onCalendarSourceChanged(src));
-                        this._registryRemovedSignalId = this._registry.connect('source-removed',
-                            (_reg, src) => this._onCalendarSourceChanged(src));
-                    }
-
-                    resolve(this._registry);
-                } catch (e) {
-                    if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                        resolve(null);
-                        return;
-                    }
-                    console.error(`Chronome service: Failed to create SourceRegistry: ${e}`);
-                    reject(e);
-                }
-            });
-        });
-    }
-
-    _connectClientAsync(source, sourceUid) {
-        return new Promise((resolve, reject) => {
-            if (!this._cancellable) { resolve(null); return; }
-            if (this._clients.has(sourceUid)) {
-                resolve(this._clients.get(sourceUid));
-                return;
+            if (this._registry) {
+                this._registryChangedSignalId = this._registry.connect('source-changed',
+                    (_reg, src) => this._onCalendarSourceChanged(src));
+                this._registryAddedSignalId = this._registry.connect('source-added',
+                    (_reg, src) => this._onCalendarSourceChanged(src));
+                this._registryRemovedSignalId = this._registry.connect('source-removed',
+                    (_reg, src) => this._onCalendarSourceChanged(src));
             }
 
-            ECal.Client.connect(
+            return this._registry;
+        } catch (e) {
+            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return null;
+            console.error(`Chronome service: Failed to create SourceRegistry: ${e}`);
+            throw e;
+        }
+    }
+
+    async _connectClientAsync(source, sourceUid) {
+        if (this._shuttingDown) return null;
+        if (this._clients.has(sourceUid))
+            return this._clients.get(sourceUid);
+
+        try {
+            const client = await ECal.Client.connect(
                 source, ECal.ClientSourceType.EVENTS,
                 CONSTANTS.CLIENT_CONNECT_TIMEOUT_SEC,
-                this._cancellable,
-                (obj, res) => {
-                    try {
-                        if (!this._cancellable) { resolve(null); return; }
-                        const client = ECal.Client.connect_finish(res);
-                        if (client) {
-                            this._clients.set(sourceUid, client);
-                            const accountEmail = getAccountEmailForSource(source, this._registry);
-                            if (accountEmail) this._accountEmails.set(sourceUid, accountEmail);
-                            const isReadonly = client.is_readonly?.() ?? false;
-                            this._calendarReadonly.set(sourceUid, isReadonly);
-                            const calendarColor = getCalendarColor(source);
-                            if (calendarColor) this._calendarColors.set(sourceUid, calendarColor);
-                            this._setupClientViewAsync(client, sourceUid);
-                        }
-                        resolve(client);
-                    } catch (e) {
-                        if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                            resolve(null);
-                            return;
-                        }
-                        console.error(`Chronome service: Failed to connect to calendar: ${e}`);
-                        resolve(null);
-                    }
-                }
+                this._cancellable
             );
-        });
+            if (this._shuttingDown) return null;
+            if (client) {
+                this._clients.set(sourceUid, client);
+                const accountEmail = getAccountEmailForSource(source, this._registry);
+                if (accountEmail) this._accountEmails.set(sourceUid, accountEmail);
+                const isReadonly = client.is_readonly?.() ?? false;
+                this._calendarReadonly.set(sourceUid, isReadonly);
+                const calendarColor = getCalendarColor(source);
+                if (calendarColor) this._calendarColors.set(sourceUid, calendarColor);
+                this._setupClientViewAsync(client, sourceUid);
+            }
+            return client;
+        } catch (e) {
+            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return null;
+            console.error(`Chronome service: Failed to connect to calendar: ${e}`);
+            return null;
+        }
     }
 
     _generateInstancesAsync(client, startTimet, endTimet, cancellable) {
         return new Promise((resolve, reject) => {
             const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                 this._sourceIds?.delete(id);
-                if (!this._cancellable) { resolve([]); return GLib.SOURCE_REMOVE; }
+                if (this._shuttingDown) { resolve([]); return GLib.SOURCE_REMOVE; }
                 const instances = [];
                 try {
                     client.generate_instances_sync(
@@ -616,82 +619,76 @@ class ChronomeService {
         });
     }
 
-    _buildRescheduledMapAsync(client, sourceUid, todayDateStr) {
+    async _buildRescheduledMapAsync(client, sourceUid, todayDateStr) {
         if (this._cacheDate !== todayDateStr) {
             this._rescheduledCache.clear();
             this._cacheDate = todayDateStr;
         }
 
         if (this._rescheduledCache.has(sourceUid))
-            return Promise.resolve(this._rescheduledCache.get(sourceUid));
+            return this._rescheduledCache.get(sourceUid);
 
         const accountEmail = this._accountEmails.get(sourceUid) || null;
         const calendarColor = this._calendarColors.get(sourceUid) || null;
+        const result = { rescheduledFromToday: new Map(), movedToToday: [] };
 
-        return new Promise((resolve) => {
-            const result = { rescheduledFromToday: new Map(), movedToToday: [] };
+        if (this._shuttingDown) return result;
 
-            if (!this._cancellable) { resolve(result); return; }
+        const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
+        let storedComps;
+        try {
+            [, storedComps] = await client.get_object_list_as_comps(query, this._cancellable);
+        } catch (e) {
+            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return result;
+            console.error(`Chronome service: Error in get_object_list_as_comps: ${e}`);
+            this._rescheduledCache.set(sourceUid, result);
+            return result;
+        }
 
-            const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
-            client.get_object_list_as_comps(query, this._cancellable, (obj, res) => {
-                try {
-                    if (!this._cancellable) { resolve(result); return; }
-                    const [success, storedComps] = client.get_object_list_as_comps_finish(res);
+        if (this._shuttingDown) return result;
 
-                    if (success && storedComps) {
-                        for (const comp of storedComps) {
-                            const icalStr = comp.get_as_string ? comp.get_as_string() : '';
-                            const recurIdDateStr = extractIcalDateString(icalStr, 'RECURRENCE-ID');
-                            if (!recurIdDateStr) continue;
+        if (storedComps) {
+            for (const comp of storedComps) {
+                const icalStr = comp.get_as_string();
+                const recurIdDateStr = extractIcalDateString(icalStr, 'RECURRENCE-ID');
+                if (!recurIdDateStr) continue;
 
-                            const storedDtstartDateStr = extractIcalDateString(icalStr, 'DTSTART');
-                            const uid = comp.get_uid ? comp.get_uid() : '';
-                            if (!uid || !storedDtstartDateStr) continue;
+                const storedDtstartDateStr = extractIcalDateString(icalStr, 'DTSTART');
+                const uid = comp.get_uid();
+                if (!uid || !storedDtstartDateStr) continue;
 
-                            if (recurIdDateStr === todayDateStr && storedDtstartDateStr !== todayDateStr) {
-                                const key = `${uid}:${recurIdDateStr}`;
-                                result.rescheduledFromToday.set(key, storedDtstartDateStr);
-                            }
+                if (recurIdDateStr === todayDateStr && storedDtstartDateStr !== todayDateStr) {
+                    const key = `${uid}:${recurIdDateStr}`;
+                    result.rescheduledFromToday.set(key, storedDtstartDateStr);
+                }
 
-                            if (recurIdDateStr !== todayDateStr && storedDtstartDateStr === todayDateStr) {
-                                const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
-                                const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
-                                const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
+                if (recurIdDateStr !== todayDateStr && storedDtstartDateStr === todayDateStr) {
+                    const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
+                    const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
+                    const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
 
-                                if (parsedStart?.timestampMs) {
-                                    const icalComp = comp.get_icalcomponent ? comp.get_icalcomponent() : null;
-                                    if (icalComp) {
-                                        const instanceStartMs = parsedStart.timestampMs;
-                                        const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS);
-                                        const recurrenceIdStartMs = parsedRecurId?.timestampMs || null;
-                                        result.movedToToday.push(
-                                            this._wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
-                                                accountEmail, calendarColor, recurrenceIdStartMs)
-                                        );
-                                    }
-                                }
-                            }
+                    if (parsedStart?.timestampMs) {
+                        const icalComp = comp.get_icalcomponent();
+                        if (icalComp) {
+                            const instanceStartMs = parsedStart.timestampMs;
+                            const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS);
+                            const recurrenceIdStartMs = parsedRecurId?.timestampMs || null;
+                            result.movedToToday.push(
+                                this._wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
+                                    accountEmail, calendarColor, recurrenceIdStartMs)
+                            );
                         }
                     }
-
-                    this._rescheduledCache.set(sourceUid, result);
-                    resolve(result);
-                } catch (e) {
-                    if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
-                        resolve(result);
-                        return;
-                    }
-                    console.error(`Chronome service: Error in get_object_list_as_comps: ${e}`);
-                    this._rescheduledCache.set(sourceUid, result);
-                    resolve(result);
                 }
-            });
-        });
+            }
+        }
+
+        this._rescheduledCache.set(sourceUid, result);
+        return result;
     }
 
     async _queryEventsAsync(client, sourceUid) {
-        if (!client || !this._cancellable) return [];
+        if (!client || this._shuttingDown) return [];
 
         const now = new Date();
         const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -738,7 +735,7 @@ class ChronomeService {
             }
 
             if (recurrenceId) {
-                const uid = inst.comp.get_uid ? inst.comp.get_uid() : '';
+                const uid = inst.comp.get_uid();
                 const key = `${uid}:${todayDateStr}`;
                 if (rescheduledFromToday.has(key)) continue;
             }
@@ -775,7 +772,7 @@ class ChronomeService {
             get_as_string: () => comp.as_ical_string?.() ?? null,
             get_recurid_as_string: () => {
                 const recurid = comp.get_recurrenceid?.();
-                return recurid?.as_ical_string?.() ?? (recurid ? String(recurid) : null);
+                return recurid?.as_ical_string?.() ?? null;
             },
         };
 
@@ -786,7 +783,7 @@ class ChronomeService {
     }
 
     async _fetchAllEventsAsync() {
-        if (!this._cancellable) return [];
+        if (this._shuttingDown) return [];
 
         const registry = await this._ensureRegistryAsync();
         if (!registry) return [];
@@ -823,33 +820,41 @@ class ChronomeService {
 
     // --- EDS change notifications ---
 
-    _setupClientViewAsync(client, sourceUid) {
-        if (!client || !this._cancellable) return;
+    async _setupClientViewAsync(client, sourceUid) {
+        if (!client || this._shuttingDown) return;
 
-        client.get_view('#t', this._cancellable, (obj, res) => {
-            try {
-                if (!this._cancellable) return;
-                const [success, view] = client.get_view_finish(res);
+        // '#t' matches every component. A narrower (occur-in-time-range? ...)
+        // query would also filter which changes emit objects-added/modified/
+        // removed signals, so edits to events outside the window would not
+        // trigger a refresh and the UI would drift stale until the next poll.
+        let success, view;
+        try {
+            [success, view] = await client.get_view('#t', this._cancellable);
+        } catch (e) {
+            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+            console.error(`Chronome service: Error setting up client view: ${e}`);
+            return;
+        }
 
-                if (success && view) {
-                    const boundHandler = () => this._onCalendarObjectsChanged(sourceUid);
-                    const signals = [
-                        {id: view.connect('objects-added', boundHandler), obj: view},
-                        {id: view.connect('objects-modified', boundHandler), obj: view},
-                        {id: view.connect('objects-removed', boundHandler), obj: view},
-                    ];
-                    this._clientViews.set(sourceUid, {view, signals});
-                    view.start();
-                }
-            } catch (e) {
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
-                console.error(`Chronome service: Error setting up client view: ${e}`);
-            }
-        });
+        if (this._shuttingDown) {
+            if (success && view) view.stop();
+            return;
+        }
+
+        if (success && view) {
+            const boundHandler = () => this._onCalendarObjectsChanged(sourceUid);
+            const signals = [
+                {id: view.connect('objects-added', boundHandler), obj: view},
+                {id: view.connect('objects-modified', boundHandler), obj: view},
+                {id: view.connect('objects-removed', boundHandler), obj: view},
+            ];
+            this._clientViews.set(sourceUid, {view, signals});
+            view.start();
+        }
     }
 
     _debouncedRefresh() {
-        if (!this._cancellable) return;
+        if (this._shuttingDown) return;
         if (this._refreshDebounceId)
             GLib.Source.remove(this._refreshDebounceId);
         this._refreshDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.DEBOUNCE_MS, () => {
@@ -868,12 +873,9 @@ class ChronomeService {
             if (sourceUid) {
                 if (this._clientViews?.has(sourceUid)) {
                     const viewData = this._clientViews.get(sourceUid);
-                    try {
-                        viewData.view?.stop();
-                        for (const sig of viewData.signals || []) {
-                            try { sig.obj?.disconnect(sig.id); } catch (_e) { /* ignore */ }
-                        }
-                    } catch (_e) { /* ignore */ }
+                    viewData.view.stop();
+                    for (const sig of viewData.signals || [])
+                        sig.obj.disconnect(sig.id);
                     this._clientViews.delete(sourceUid);
                 }
 

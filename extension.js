@@ -104,7 +104,6 @@ const ChronomeIndicator = GObject.registerClass({
                         this._onEventsChanged(json);
                     }
                 } catch (e) {
-                    // Service may still be starting - EventsChanged signal will arrive later
                     console.debug(`Chronome: GetEvents call failed (service may be starting): ${e.message}`);
                 }
             }
@@ -113,15 +112,17 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Handle EventsChanged signal from service
     _onEventsChanged(json) {
+        let data;
         try {
-            const data = JSON.parse(json);
-            this._nextMeeting = data.nextMeeting;
-            this._events = data.events || [];
-            this._dataLoaded = true;
-            this._updateFromCache();
+            data = JSON.parse(json);
         } catch (e) {
-            console.error(`Chronome: Failed to parse events JSON: ${e}`);
+            console.error(`Chronome: Failed to parse events payload: ${e.message}`);
+            return;
         }
+        this._nextMeeting = data.nextMeeting;
+        this._events = data.events || [];
+        this._dataLoaded = true;
+        this._updateFromCache();
     }
 
     // Update all UI from cached data
@@ -133,8 +134,7 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Update the top bar label
     _updateLabel(text) {
-        if (text)
-            this._label.set_text(text);
+        this._label.set_text(text);
     }
 
     // Update the panel icon based on settings
@@ -181,12 +181,10 @@ const ChronomeIndicator = GObject.registerClass({
             GLib.Source.remove(this._displayTimeout);
             this._displayTimeout = null;
         }
-
         if (this._settings.get_boolean('real-time-countdown')) {
             this._displayTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
                 if (this._nextMeeting) {
                     if (this._nextMeeting.endMs < Date.now()) {
-                        // Meeting ended - clear stale data and ask service for fresh data
                         this._nextMeeting = null;
                         this._updatePanelLabel(null);
                         this._updateIcon();
@@ -204,9 +202,7 @@ const ChronomeIndicator = GObject.registerClass({
 
     // Ask the D-Bus service to refresh
     _refreshEvents() {
-        this._proxy.call('Refresh', null, Gio.DBusCallFlags.NONE, 5000, null, (_proxy, res) => {
-            try { _proxy.call_finish(res); } catch (_e) { /* ignore */ }
-        });
+        this._proxy.call('Refresh', null, Gio.DBusCallFlags.NONE, 5000, null, null);
     }
 
     // Update panel label based on next meeting
@@ -281,7 +277,6 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     _isSameMeeting(nextMeeting, event) {
-        if (!nextMeeting || !event) return false;
         return nextMeeting.startMs === event.startMs &&
             nextMeeting.endMs === event.endMs &&
             nextMeeting.title === event.title;
@@ -358,37 +353,38 @@ const ChronomeIndicator = GObject.registerClass({
                 ? new PopupMenu.PopupImageMenuItem('', statusIcon)
                 : new PopupMenu.PopupMenuItem('');
 
-            const gridLayout = new Clutter.GridLayout({orientation: Clutter.Orientation.HORIZONTAL});
-            const labelBox = new St.Widget({layout_manager: gridLayout, x_expand: true});
-            gridLayout.hookup_style(labelBox);
-
-            let col = 0;
+            const labelBox = new St.BoxLayout({
+                vertical: false,
+                x_expand: true,
+            });
 
             if (useColors && calendarColor) {
                 const colorBar = new St.Widget({
-                    style: `background-color: ${calendarColor}; width: 3px; margin-right: 8px;`,
+                    style_class: 'chronome-color-bar',
+                    style: `background-color: ${calendarColor};`,
                     y_expand: true,
                 });
-                gridLayout.attach(colorBar, col++, 0, 1, 1);
+                labelBox.add_child(colorBar);
             }
 
-            const timeColumnWidth = showEndTime ? '128px' : '48px';
+            const timeLabelClass = showEndTime
+                ? 'chronome-time-label chronome-time-label-wide'
+                : 'chronome-time-label';
             const timeLabel = new St.Label({
                 text: timeRange,
                 y_align: Clutter.ActorAlign.CENTER,
-                style: `min-width: ${timeColumnWidth}; margin-right: 8px;`,
+                style_class: timeLabelClass,
             });
-            gridLayout.attach(timeLabel, col++, 0, 1, 1);
+            labelBox.add_child(timeLabel);
 
             if (videoLink) {
                 const videoIcon = new St.Icon({
                     icon_name: 'camera-video-symbolic',
-                    style_class: 'popup-menu-icon',
+                    style_class: 'popup-menu-icon chronome-video-icon',
                     icon_size: CONSTANTS.MENU_ICON_SIZE,
                     y_align: Clutter.ActorAlign.CENTER,
-                    style: 'margin-right: 6px;',
                 });
-                gridLayout.attach(videoIcon, col++, 0, 1, 1);
+                labelBox.add_child(videoIcon);
             }
 
             const titleLabel = new St.Label({
@@ -402,7 +398,7 @@ const ChronomeIndicator = GObject.registerClass({
             } else {
                 titleLabel.set_text(titleText);
             }
-            gridLayout.attach(titleLabel, col++, 0, 1, 1);
+            labelBox.add_child(titleLabel);
 
             menuItem.label.hide();
             menuItem.add_child(labelBox);
@@ -458,25 +454,16 @@ const ChronomeIndicator = GObject.registerClass({
     }
 
     destroy() {
-        // Remove timers
         this.stopTimer();
 
-        // Disconnect D-Bus signal
-        if (this._proxySignalId && this._proxy) {
+        if (this._proxySignalId) {
             this._proxy.disconnectSignal(this._proxySignalId);
             this._proxySignalId = null;
         }
 
-        // Disconnect settings signals
-        if (this._settings && this._settingsSignals) {
-            for (const id of this._settingsSignals) {
-                try { this._settings.disconnect(id); } catch (_e) { /* ignore */ }
-            }
-            this._settingsSignals = null;
-        }
-
-        this._proxy = null;
-        this._settings = null;
+        for (const id of this._settingsSignals)
+            this._settings.disconnect(id);
+        this._settingsSignals = null;
 
         super.destroy();
     }
@@ -489,6 +476,7 @@ export default class ChronomeExtension extends Extension {
         this._settings = null;
         this._subprocess = null;
         this._proxy = null;
+        this._proxyCancellable = null;
         this._restartTimeoutId = null;
     }
 
@@ -498,7 +486,6 @@ export default class ChronomeExtension extends Extension {
         // Spawn the D-Bus service subprocess
         this._spawnService();
 
-        // Create D-Bus proxy
         const nodeInfo = Gio.DBusNodeInfo.new_for_xml(`
             <node>
               <interface name="${DBUS_NAME}">
@@ -515,38 +502,52 @@ export default class ChronomeExtension extends Extension {
               </interface>
             </node>`);
 
-        this._proxy = new Gio.DBusProxy({
-            g_connection: Gio.DBus.session,
-            g_name: DBUS_NAME,
-            g_object_path: DBUS_PATH,
-            g_interface_info: nodeInfo.interfaces[0],
-            g_interface_name: DBUS_NAME,
-        });
-        this._proxy.init(null);
+        this._proxyCancellable = new Gio.Cancellable();
+        Gio.DBusProxy.new_for_bus(
+            Gio.BusType.SESSION,
+            Gio.DBusProxyFlags.NONE,
+            nodeInfo.interfaces[0],
+            DBUS_NAME,
+            DBUS_PATH,
+            DBUS_NAME,
+            this._proxyCancellable,
+            (source, res) => {
+                let proxy;
+                try {
+                    proxy = Gio.DBusProxy.new_for_bus_finish(res);
+                } catch (e) {
+                    if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        console.error(`Chronome: Failed to create D-Bus proxy: ${e.message}`);
+                    return;
+                }
 
-        // Create indicator with proxy
-        this._chronomeIndicator = new ChronomeIndicator(this, this._settings, this._proxy);
-        Main.panel.addToStatusArea('chronome-indicator', this._chronomeIndicator);
-        this._chronomeIndicator.startTimer();
+                if (!this._settings) return;
 
-        // Fetch initial data (may fail if service still starting - that's OK)
-        this._chronomeIndicator.fetchInitialData();
+                this._proxy = proxy;
+                this._chronomeIndicator = new ChronomeIndicator(this, this._settings, this._proxy);
+                Main.panel.addToStatusArea('chronome-indicator', this._chronomeIndicator);
+                this._chronomeIndicator.startTimer();
+                this._chronomeIndicator.fetchInitialData();
+            }
+        );
     }
 
     disable() {
-        // Cancel any pending restart
+        if (this._proxyCancellable) {
+            this._proxyCancellable.cancel();
+            this._proxyCancellable = null;
+        }
+
         if (this._restartTimeoutId) {
             GLib.Source.remove(this._restartTimeoutId);
             this._restartTimeoutId = null;
         }
 
-        // Destroy indicator first (disconnects proxy signal)
         if (this._chronomeIndicator) {
             this._chronomeIndicator.destroy();
             this._chronomeIndicator = null;
         }
 
-        // Kill the service subprocess (SIGTERM for clean D-Bus unregistration)
         if (this._subprocess) {
             this._subprocess.send_signal(15); // SIGTERM
             this._subprocess = null;
@@ -558,16 +559,18 @@ export default class ChronomeExtension extends Extension {
 
     _spawnService() {
         const servicePath = this.path + '/service.js';
+        // STDIN_PIPE: child reads from a pipe owned by this process. When the
+        // parent dies (or disable() closes the subprocess), the pipe's write
+        // end closes and the child reads EOF — that's how _watchParent in
+        // service.js detects parent death and shuts down cleanly.
         this._subprocess = Gio.Subprocess.new(
             ['gjs', '-m', servicePath],
-            Gio.SubprocessFlags.NONE
+            Gio.SubprocessFlags.STDIN_PIPE
         );
 
-        // Monitor for unexpected death and auto-restart
         this._subprocess.wait_async(null, (proc, res) => {
             try { proc.wait_finish(res); } catch (_e) { /* ignore */ }
 
-            // If we still have settings, extension is still enabled - restart service
             if (this._settings && !this._restartTimeoutId) {
                 console.debug('Chronome: Service process died, restarting...');
                 this._restartTimeoutId = GLib.timeout_add_seconds(
@@ -577,7 +580,6 @@ export default class ChronomeExtension extends Extension {
                         this._restartTimeoutId = null;
                         if (this._settings) {
                             this._spawnService();
-                            // Re-fetch data after restart
                             if (this._chronomeIndicator)
                                 this._chronomeIndicator.fetchInitialData();
                         }

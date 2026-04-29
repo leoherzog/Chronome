@@ -10,7 +10,7 @@ cd "$SCRIPT_DIR"
 echo "Running Chronome tests..."
 echo ""
 
-gjs -m tests/runAll.js
+TZ=UTC gjs -m tests/runAll.js
 
 exit_code=$?
 

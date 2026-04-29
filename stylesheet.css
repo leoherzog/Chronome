@@ -5,3 +5,21 @@
     background-color: rgba(74, 144, 217, 0.1);
     border-radius: 5px;
 }
+
+.chronome-color-bar {
+    width: 3px;
+    margin-right: 8px;
+}
+
+.chronome-time-label {
+    min-width: 48px;
+    margin-right: 8px;
+}
+
+.chronome-time-label-wide {
+    min-width: 128px;
+}
+
+.chronome-video-icon {
+    margin-right: 6px;
+}

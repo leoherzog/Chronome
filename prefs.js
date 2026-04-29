@@ -254,7 +254,7 @@ export default class ChronomePreferences extends ExtensionPreferences {
         const loadingRow = new Adw.ActionRow({
             title: _('Loading calendars...'),
         });
-        const spinner = new Gtk.Spinner({ visible: true });
+        const spinner = new Gtk.Spinner();
         spinner.start();
         loadingRow.add_suffix(spinner);
         calendarsGroup.add(loadingRow);
@@ -263,71 +263,68 @@ export default class ChronomePreferences extends ExtensionPreferences {
 
         // Load registry asynchronously
         EDataServer.SourceRegistry.new(null, (obj, res) => {
+            // Check if prefs window was closed before callback fired
+            if (!calendarsGroup.get_parent()) {
+                return;
+            }
+
+            calendarsGroup.remove(loadingRow);
+
+            let registry;
             try {
-                // Check if prefs window was closed before callback fired
-                if (!calendarsGroup.get_parent()) {
-                    return;
-                }
-
-                // Remove loading indicator
-                calendarsGroup.remove(loadingRow);
-
-                const registry = EDataServer.SourceRegistry.new_finish(res);
-                const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
-                const enabledCalendars = settings.get_strv('enabled-calendars');
-
-                // Filter to enabled sources
-                const enabledSources = sources.filter(s => s.get_enabled());
-
-                // Deduplicate sources by calendar ID (keeps owner's version for shared calendars)
-                const dedupedSources = deduplicateSources(enabledSources, registry);
-
-                // Sort by display name
-                const sortedSources = dedupedSources.sort((a, b) =>
-                    a.get_display_name().localeCompare(b.get_display_name()));
-
-                if (sortedSources.length === 0) {
-                    const noCalendarsRow = new Adw.ActionRow({
-                        title: _('No calendars found'),
-                        subtitle: _('Add calendars in GNOME Online Accounts'),
-                    });
-                    calendarsGroup.add(noCalendarsRow);
-                    return;
-                }
-
-                for (const source of sortedSources) {
-                    const sourceUid = source.get_uid();
-                    const sourceName = source.get_display_name();
-
-                    const calendarRow = new Adw.SwitchRow({
-                        title: sourceName,
-                        active: enabledCalendars.includes(sourceUid),
-                        use_markup: false,
-                    });
-
-                    calendarRow.connect('notify::active', () => {
-                        let current = settings.get_strv('enabled-calendars');
-                        if (calendarRow.active && !current.includes(sourceUid)) {
-                            current.push(sourceUid);
-                        } else if (!calendarRow.active) {
-                            current = current.filter(id => id !== sourceUid);
-                        }
-                        settings.set_strv('enabled-calendars', current);
-                    });
-
-                    calendarsGroup.add(calendarRow);
-                }
+                registry = EDataServer.SourceRegistry.new_finish(res);
             } catch (e) {
-                // Remove loading indicator if it exists
-                try {
-                    calendarsGroup.remove(loadingRow);
-                } catch (err) { /* ignore */ }
-
                 const errorRow = new Adw.ActionRow({
                     title: _('Could not load calendars'),
                     subtitle: e.message,
                 });
                 calendarsGroup.add(errorRow);
+                return;
+            }
+
+            const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
+            const enabledCalendars = settings.get_strv('enabled-calendars');
+
+            // Filter to enabled sources
+            const enabledSources = sources.filter(s => s.get_enabled());
+
+            // Deduplicate sources by calendar ID (keeps owner's version for shared calendars)
+            const dedupedSources = deduplicateSources(enabledSources, registry);
+
+            // Sort by display name
+            const sortedSources = dedupedSources.sort((a, b) =>
+                a.get_display_name().localeCompare(b.get_display_name()));
+
+            if (sortedSources.length === 0) {
+                const noCalendarsRow = new Adw.ActionRow({
+                    title: _('No calendars found'),
+                    subtitle: _('Add calendars in GNOME Online Accounts'),
+                });
+                calendarsGroup.add(noCalendarsRow);
+                return;
+            }
+
+            for (const source of sortedSources) {
+                const sourceUid = source.get_uid();
+                const sourceName = source.get_display_name();
+
+                const calendarRow = new Adw.SwitchRow({
+                    title: sourceName,
+                    active: enabledCalendars.includes(sourceUid),
+                    use_markup: false,
+                });
+
+                calendarRow.connect('notify::active', () => {
+                    let current = settings.get_strv('enabled-calendars');
+                    if (calendarRow.active && !current.includes(sourceUid)) {
+                        current.push(sourceUid);
+                    } else if (!calendarRow.active) {
+                        current = current.filter(id => id !== sourceUid);
+                    }
+                    settings.set_strv('enabled-calendars', current);
+                });
+
+                calendarsGroup.add(calendarRow);
             }
         });
 
