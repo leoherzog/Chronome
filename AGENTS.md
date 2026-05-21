@@ -33,7 +33,8 @@ Chronome/
 │   ├── eventUtils.test.js
 │   ├── formatting.test.js
 │   ├── icalParser.test.js
-│   └── meetingServices.test.js
+│   ├── meetingServices.test.js
+│   └── diagnose-rescheduled.js  # Manual live-EDS diagnostic (not in runAll.js)
 └── .github/workflows/
     └── release.yml        # GitHub Actions release workflow
 ```
@@ -113,6 +114,10 @@ Uses a custom minimal BDD-style test runner (`tests/runner.js`) that runs under 
 ### Testing Philosophy
 
 Only `lib/` modules are tested - they are pure functions with no GNOME Shell dependencies. The main `extension.js` cannot be tested outside GNOME Shell.
+
+### Manual Diagnostics
+
+`tests/diagnose-rescheduled.js` is a manual diagnostic (not part of `runAll.js`) that connects to the live Evolution Data Server. Run it with `gjs -m tests/diagnose-rescheduled.js` to inspect how recurring/rescheduled instances behave against real calendar data. It is read-only. Note: `gjs` may print a harmless `Segmentation fault` during interpreter teardown, after all output is complete — a known libical/GJS shutdown crash.
 
 ## Release and Packaging
 
@@ -370,6 +375,23 @@ import {functionName} from './lib/moduleName.js';
        try { obj.refresh_finish(res); } catch (e) { ... }
    });
    ```
+
+### Promisified EDS Results (service.js)
+
+`Gio._promisify` does NOT resolve the same shape that the matching `*_sync` call returns. An EDS `gboolean fn(…, out X)` function returns `[ok, X]` from its `*_sync` variant, but the **promisified async variant resolves to just `[X]`** — GJS strips the leading `gboolean` success value. (At least one GJS version was observed keeping `[ok, X]`, so handle both shapes.)
+
+Destructuring the awaited result `*_sync`-style as `[, value]` therefore reads `undefined`. Use the `unwrapAsyncResult()` helper instead:
+
+```javascript
+// WRONG — reads undefined; the leading boolean was stripped
+[, storedComps] = await client.get_object_list_as_comps(query, cancellable);
+
+// RIGHT
+storedComps = unwrapAsyncResult(
+    await client.get_object_list_as_comps(query, cancellable));
+```
+
+This silently broke two call sites: `get_object_list_as_comps` (the `rescheduledFromToday` map was always empty, so rescheduled instances were never skipped — they leaked into their original day) and `get_view` (client views were never started, so signal-based cache invalidation never ran). Calls whose `*_finish` returns the value directly (`ECal.Client.connect`, `SourceRegistry.new`, `read_bytes_async`) are unaffected; so is `refresh` (no out-arg, return value unused).
 
 ### GLib Timer Management
 

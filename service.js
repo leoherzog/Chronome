@@ -26,6 +26,17 @@ Gio._promisify(ECal.Client.prototype, 'get_view', 'get_view_finish');
 Gio._promisify(EDataServer.SourceRegistry, 'new', 'new_finish');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
 
+// EDS `*_finish` functions return `gboolean ok` plus the real value as an
+// out-arg. GJS's Gio._promisify strips that leading success boolean, so a
+// promisified `gboolean fn(out X)` resolves to `[X]` -- not `[ok, X]` like the
+// matching `*_sync` call returns. (One GJS version was also seen to keep
+// `[ok, X]`.) Normalize both shapes to just `X`.
+function unwrapAsyncResult(result) {
+    if (!Array.isArray(result))
+        return result;
+    return typeof result[0] === 'boolean' ? result[1] : result[0];
+}
+
 // D-Bus interface
 const DBUS_NAME = 'tech.herzog.Chronome1';
 const DBUS_PATH = '/tech/herzog/Chronome';
@@ -637,7 +648,8 @@ class ChronomeService {
         const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
         let storedComps;
         try {
-            [, storedComps] = await client.get_object_list_as_comps(query, this._cancellable);
+            storedComps = unwrapAsyncResult(
+                await client.get_object_list_as_comps(query, this._cancellable));
         } catch (e) {
             if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return result;
             console.error(`Chronome service: Error in get_object_list_as_comps: ${e}`);
@@ -827,9 +839,9 @@ class ChronomeService {
         // query would also filter which changes emit objects-added/modified/
         // removed signals, so edits to events outside the window would not
         // trigger a refresh and the UI would drift stale until the next poll.
-        let success, view;
+        let view;
         try {
-            [success, view] = await client.get_view('#t', this._cancellable);
+            view = unwrapAsyncResult(await client.get_view('#t', this._cancellable));
         } catch (e) {
             if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
             console.error(`Chronome service: Error setting up client view: ${e}`);
@@ -837,11 +849,11 @@ class ChronomeService {
         }
 
         if (this._shuttingDown) {
-            if (success && view) view.stop();
+            if (view) view.stop();
             return;
         }
 
-        if (success && view) {
+        if (view) {
             const boundHandler = () => this._onCalendarObjectsChanged(sourceUid);
             const signals = [
                 {id: view.connect('objects-added', boundHandler), obj: view},
