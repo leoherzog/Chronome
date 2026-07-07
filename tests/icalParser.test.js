@@ -1,6 +1,6 @@
 // Tests for lib/icalParser.js
 import { describe, it, expect } from './runner.js';
-import { extractIcalProperty, parseIcalDateTime, extractIcalDateString } from '../lib/icalParser.js';
+import { extractIcalProperty, parseIcalDateTime, extractIcalDateString, resolveTimezone } from '../lib/icalParser.js';
 
 describe('extractIcalProperty', function() {
     it('should extract DTSTART with UTC time', function() {
@@ -68,6 +68,40 @@ END:VEVENT`;
     });
 });
 
+describe('resolveTimezone', function() {
+    it('should resolve a plain IANA tzid directly', function() {
+        const tz = resolveTimezone('Europe/London');
+        expect(tz.get_identifier()).toBe('Europe/London');
+    });
+
+    it('should resolve another plain IANA tzid directly', function() {
+        const tz = resolveTimezone('America/New_York');
+        expect(tz.get_identifier()).toBe('America/New_York');
+    });
+
+    it('should strip a globally-unique TZID domain prefix (GNOME Calendar local calendars)', function() {
+        const tz = resolveTimezone('/freeassociation.sourceforge.net/Europe/London');
+        expect(tz.get_identifier()).toBe('Europe/London');
+    });
+
+    it('should strip a globally-unique TZID prefix for a multi-segment Olson name', function() {
+        const tz = resolveTimezone('/freeassociation.sourceforge.net/America/Indiana/Indianapolis');
+        expect(tz.get_identifier()).toBe('America/Indiana/Indianapolis');
+    });
+
+    it('should fall back to UTC for a totally bogus tzid (same as before the fix)', function() {
+        const tz = resolveTimezone('Not/A/Real/Zone');
+        expect(tz.get_identifier()).toBe('UTC');
+    });
+
+    it('should not mistake a plain slash-prefixed non-domain string for the GNOME Calendar case', function() {
+        // First segment has no dot, so this isn't the domain-prefix pattern --
+        // should fall through to the same UTC fallback as any bogus tzid.
+        const tz = resolveTimezone('/Europe/London');
+        expect(tz.get_identifier()).toBe('UTC');
+    });
+});
+
 describe('parseIcalDateTime', function() {
     it('should parse UTC datetime correctly', function() {
         const ical = 'DTSTART:20250120T120000Z';
@@ -121,6 +155,20 @@ END:VEVENT`;
         const result = parseIcalDateTime(ical, 'DTSTART');
         expect(result).not.toBeNull();
         expect(result.timestampMs).toBeGreaterThan(0);
+    });
+
+    it('should resolve a GNOME Calendar globally-unique TZID to the correct DST-aware offset', function() {
+        // Regression test for the ~60min offset bug: this TZID form (observed
+        // from a real GNOME Calendar local calendar) used to silently resolve
+        // to UTC instead of Europe/London's BST (+1h) summer offset.
+        const buggyTzidIcal = 'DTSTART;TZID=/freeassociation.sourceforge.net/Europe/London:20250715T111500';
+        const plainTzidIcal = 'DTSTART;TZID=Europe/London:20250715T111500';
+
+        const buggyResult = parseIcalDateTime(buggyTzidIcal, 'DTSTART');
+        const plainResult = parseIcalDateTime(plainTzidIcal, 'DTSTART');
+
+        expect(buggyResult).not.toBeNull();
+        expect(buggyResult.timestampMs).toBe(plainResult.timestampMs);
     });
 
     it('should parse Feb 29 on a leap year (2024) correctly', function() {
