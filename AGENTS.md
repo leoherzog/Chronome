@@ -281,6 +281,7 @@ Time constants in milliseconds:
 - `extractIcalProperty(icalStr, propName)` - Extract raw property from iCal
 - `parseIcalDateTime(icalStr, propName)` - Parse to timestamp with timezone handling
 - `extractIcalDateString(icalStr, propName)` - Extract YYYYMMDD date portion
+- `resolveTimezone(tzid)` - Resolve a TZID to a `GLib.TimeZone`, working around `GLib.TimeZone.new()`'s silent UTC fallback for globally-unique TZIDs (e.g. `/freeassociation.sourceforge.net/Europe/London`, seen on GNOME Calendar's local calendars) by stripping the domain prefix and retrying with the plain Olson name
 
 ### `calendarUtils.js`
 - `getCalendarColor(source)` - Get hex color from EDS source

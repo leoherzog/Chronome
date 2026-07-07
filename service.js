@@ -14,7 +14,7 @@ import ICalGLib from 'gi://ICalGLib?version=3.0';
 // Resolve lib/ relative to this script
 import {getAccountEmailForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';
 // truncateText not needed - service sends full titles, extension truncates for display
-import {parseIcalDateTime, extractIcalDateString} from './lib/icalParser.js';
+import {parseIcalDateTime, extractIcalDateString, resolveTimezone} from './lib/icalParser.js';
 import {deduplicateEvents, getNextMeeting as getNextMeetingPure, isAllDayEventHeuristic} from './lib/eventUtils.js';
 import {ONE_HOUR_MS} from './lib/constants.js';
 import {findMeetingUrl} from './lib/meetingServices.js';
@@ -493,7 +493,7 @@ class ChronomeService {
         let tz;
         const tzid = timeValue.get_tzid?.();
         if (tzid)
-            tz = GLib.TimeZone.new(tzid);
+            tz = resolveTimezone(tzid);
         else
             tz = GLib.TimeZone.new_local();
 
