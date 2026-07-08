@@ -50,7 +50,7 @@ Supported versions (from `metadata.json`): **45, 46, 47, 48, 49**
 The extension explicitly requires these versions:
 - `ECal?version=2.0` - Evolution Calendar
 - `EDataServer?version=1.2` - Evolution Data Server
-- `ICalGLib?version=3.0` - iCalendar library
+- `ICalGLib` - iCalendar library; dynamically imported as `4.0` with a `3.0` fallback, because libical-glib's GIR version tracks the libical major soversion and libical-4.x distros (e.g. Arch with GNOME 50) ship only `ICalGLib-4.0`. The API surface Chronome uses is identical in both, and the version EDS loaded always wins since ECal is imported first.
 
 ### Runtime Requirements
 
@@ -534,6 +534,7 @@ const dtstartMatch = icalStr.match(/DTSTART[^:]*:(\d{8})/);
 - Method names differ:
   - `ICalGLib.Component`: `as_ical_string()`, `get_recurrenceid()`
   - `ECal.Component`: `get_as_string()`, `get_recurid_as_string()`
+- **`get_recurrenceid()` never returns null**: libical returns a truthy all-zero "null time" object for components without a RECURRENCE-ID (stringified: `00000000T000000`). Always guard with `is_null_time()` before treating the result as a real recurrence id.
 
 ### Callback Parameter Types
 

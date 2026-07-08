@@ -46,6 +46,21 @@ describe('hasRecurrenceId', function() {
         event.get_recurid_as_string = () => '';
         expect(hasRecurrenceId(event)).toBeFalsy();
     });
+
+    it('should return false for a libical null-time recurrence ID string', function() {
+        const event = createMockEvent({});
+        // libical's get_recurrenceid() returns an all-zero "null time" (never
+        // null) for components without RECURRENCE-ID; stringified it becomes
+        // this placeholder
+        event.get_recurid_as_string = () => '00000000T000000';
+        expect(hasRecurrenceId(event)).toBeFalsy();
+    });
+
+    it('should return true for a real recurrence ID string', function() {
+        const event = createMockEvent({});
+        event.get_recurid_as_string = () => '20251210T140000Z';
+        expect(hasRecurrenceId(event)).toBeTruthy();
+    });
 });
 
 describe('getEventDedupeKey', function() {

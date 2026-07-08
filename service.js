@@ -6,10 +6,18 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-// Load ECal 2.0, EDataServer, and ICalGLib modules with version specifiers
+// Load ECal 2.0 and EDataServer modules with version specifiers
 import ECal from 'gi://ECal?version=2.0';
 import EDataServer from 'gi://EDataServer?version=1.2';
-import ICalGLib from 'gi://ICalGLib?version=3.0';
+
+// libical-glib's GIR version tracks the libical major soversion, so distros on
+// libical 4.x ship only ICalGLib-4.0 (identical API surface to 3.0 for
+// everything used here). A static import of a missing version would kill the
+// service uncatchably, so probe 4.0 and fall back to 3.0. ECal is imported
+// first (above), so EDS's own ICalGLib dependency is already loaded and the
+// matching version request resolves against it either way.
+const ICalGLib = (await import('gi://ICalGLib?version=4.0')
+    .catch(() => import('gi://ICalGLib?version=3.0'))).default;
 
 // Resolve lib/ relative to this script
 import {getAccountEmailForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';
@@ -722,7 +730,10 @@ class ChronomeService {
 
         const instances = [];
         for (const inst of rawInstances) {
-            const recurrenceId = inst.comp.get_recurrenceid ? inst.comp.get_recurrenceid() : null;
+            // libical returns a truthy all-zero "null time" object (never
+            // null) from get_recurrenceid() when there's no RECURRENCE-ID
+            const rawRecurrenceId = inst.comp.get_recurrenceid ? inst.comp.get_recurrenceid() : null;
+            const recurrenceId = rawRecurrenceId && !rawRecurrenceId.is_null_time?.() ? rawRecurrenceId : null;
             let instanceStartMs = inst.startMs;
             let instanceEndMs = inst.endMs;
             let recurrenceIdStartMs = recurrenceId ? this._icalTimeToTimestamp(recurrenceId) : null;
@@ -784,7 +795,9 @@ class ChronomeService {
             get_as_string: () => comp.as_ical_string?.() ?? null,
             get_recurid_as_string: () => {
                 const recurid = comp.get_recurrenceid?.();
-                return recurid?.as_ical_string?.() ?? null;
+                if (!recurid || recurid.is_null_time?.())
+                    return null;
+                return recurid.as_ical_string?.() ?? null;
             },
         };
 
