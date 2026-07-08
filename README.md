@@ -14,9 +14,9 @@ A GNOME Shell extension that displays your upcoming calendar meetings and agenda
 
 ## Installation
 
-### From extensions.gnome.org (Recommended)
+### From extensions.gnome.org (Pending Review)
 
-Visit [extensions.gnome.org](https://extensions.gnome.org/) and search for "Chronome", or install directly from the [extension page](https://extensions.gnome.org/extension/chronome/).
+Chronome has been submitted to [extensions.gnome.org](https://extensions.gnome.org/) and is awaiting review. Once approved, it will be installable from there with one click. Until then, use the manual installation below.
 
 ### Manual Installation
 
@@ -38,7 +38,7 @@ On X11, restart GNOME Shell with Alt+F2 → `r` → Enter. On Wayland, log out a
 
 ## Requirements
 
-- GNOME Shell 45, 46, 47, 48, or 49
+- GNOME Shell 45, 46, 47, 48, 49, or 50
 - Evolution Data Server (typically pre-installed on GNOME desktops)
 - GNOME Online Accounts (optional, for cloud calendar sync)
 
@@ -62,13 +62,15 @@ gnome-extensions prefs chronome@herzog.tech
 | Calendar Colors | Show colored borders matching your calendar colors |
 | Event Types | Toggle all-day, regular, declined, and tentative events |
 | Show Past Events | Include events that have already ended in the menu |
+| Show Event End Time | Display event end times in the dropdown menu |
+| Refresh Interval | How often to re-fetch events from Evolution Data Server |
 | Enabled Calendars | Select which calendars to display |
 
 ## Supported Video Conferencing Services
 
 Chronome detects video conference links in event locations and descriptions. Supported services include:
 
-Zoom, Microsoft Teams, Google Meet, Webex, Jitsi, GoToMeeting, BlueJeans, Whereby, Around, Gather, Discord, Slack, Facetime, Amazon Chime, RingCentral, Livestorm, Vowel, Zhumu, Lark, Feishu, Voov, Teambition, Welink, Skype, Pop, Chorus, Gong, PhoneBurner, Demodesk, Join.me, and many more.
+Zoom, Microsoft Teams, Google Meet, Webex, Jitsi, GoToMeeting, BlueJeans, Whereby, Around, Gather, Discord, Slack, FaceTime, Amazon Chime, RingCentral, Livestorm, Vowel, Zhumu, Lark, Feishu, VooV, Skype, Pop, Chorus, Gong, Demodesk, Join.me, and many more.
 
 ## License
 

@@ -43,7 +43,7 @@ Chronome/
 
 ### GNOME Shell Versions
 
-Supported versions (from `metadata.json`): **45, 46, 47, 48, 49**
+Supported versions (from `metadata.json`): **45, 46, 47, 48, 49, 50**
 
 ### GI Module Versions
 
