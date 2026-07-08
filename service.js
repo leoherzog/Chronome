@@ -10,14 +10,8 @@ import GLib from 'gi://GLib';
 import ECal from 'gi://ECal?version=2.0';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
-// libical-glib's GIR version tracks the libical major soversion, so distros on
-// libical 4.x ship only ICalGLib-4.0 (identical API surface to 3.0 for
-// everything used here). A static import of a missing version would kill the
-// service uncatchably, so probe 4.0 and fall back to 3.0. ECal is imported
-// first (above), so EDS's own ICalGLib dependency is already loaded and the
-// matching version request resolves against it either way.
-const ICalGLib = (await import('gi://ICalGLib?version=4.0')
-    .catch(() => import('gi://ICalGLib?version=3.0'))).default;
+// ICalGLib 3.0 or 4.0. See AGENTS.md "GI Module Versions" section
+import ICalGLib from 'gi://ICalGLib';
 
 // Resolve lib/ relative to this script
 import {getAccountEmailForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';

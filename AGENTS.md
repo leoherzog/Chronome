@@ -50,7 +50,7 @@ Supported versions (from `metadata.json`): **45, 46, 47, 48, 49**
 The extension explicitly requires these versions:
 - `ECal?version=2.0` - Evolution Calendar
 - `EDataServer?version=1.2` - Evolution Data Server
-- `ICalGLib` - iCalendar library; dynamically imported as `4.0` with a `3.0` fallback, because libical-glib's GIR version tracks the libical major soversion and libical-4.x distros (e.g. Arch with GNOME 50) ship only `ICalGLib-4.0`. The API surface Chronome uses is identical in both, and the version EDS loaded always wins since ECal is imported first.
+- `ICalGLib` - iCalendar library; imported **unversioned** on purpose, because libical-glib's GIR version tracks the libical major soversion and libical-4.x distros (e.g. Arch with GNOME 50) ship only `ICalGLib-4.0`. The API surface Chronome uses is identical in 3.0 and 4.0, and since ECal is imported first, EDS's typelib dependencies have already loaded the matching version — the unversioned import reuses it and can never mismatch EDS. Do NOT switch this to a top-level `await import()` fallback: top-level await turns module evaluation into a promise job, and `GLib.MainLoop.run()` in `start()` then starves all promise resolution in the process (GJS can't drain its job queue inside a main loop nested in a job), silently deadlocking the refresh pipeline while sync D-Bus methods keep answering.
 
 ### Runtime Requirements
 
