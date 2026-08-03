@@ -10,8 +10,8 @@ Chronome is a GNOME Shell extension that displays upcoming calendar meetings in 
 
 ```
 Chronome/
-├── extension.js           # Thin UI layer (panel indicator, menu, D-Bus proxy)
-├── service.js             # D-Bus service (EDS connections, event processing)
+├── extension.js           # Entry point (subprocess lifecycle, D-Bus proxy)
+├── service.js             # D-Bus service entry point (EDS connections, event processing)
 ├── prefs.js               # Preferences window (Adw/libadwaita)
 ├── metadata.json          # Extension metadata (UUID, versions, etc.)
 ├── stylesheet.css         # Custom CSS styles
@@ -24,6 +24,12 @@ Chronome/
 │   ├── formatting.js      # Time/duration formatting, text truncation
 │   ├── icalParser.js      # iCal date/time parsing from raw strings
 │   └── meetingServices.js # Video conference URL detection (40+ patterns)
+├── ui/                    # Shell-process-only modules (St/Clutter/PanelMenu)
+│   └── indicator.js       # ChronomeIndicator panel button, menu, countdown timer
+├── service/               # Service-process-only modules (ECal/EDataServer)
+│   ├── asyncResult.js     # unwrapAsyncResult() for promisified EDS results
+│   ├── eventProperties.js # Component property readers, PARTSTAT, all-day, video links
+│   └── eventQuery.js      # Instance generation, rescheduled map, per-source query
 ├── schemas/
 │   └── org.gnome.shell.extensions.chronome.gschema.xml
 ├── tests/
@@ -64,8 +70,8 @@ The extension explicitly requires these versions:
 # Compile GSettings schema (required after schema changes)
 glib-compile-schemas schemas/
 
-# Install extension locally for testing
-cp -r . ~/.local/share/gnome-shell/extensions/chronome@herzog.tech/
+# Install extension locally for testing (packs only the files that ship)
+./release.sh && gnome-extensions install --force chronome@herzog.tech.zip
 
 # Enable extension
 gnome-extensions enable chronome@herzog.tech
@@ -113,7 +119,7 @@ Uses a custom minimal BDD-style test runner (`tests/runner.js`) that runs under 
 
 ### Testing Philosophy
 
-Only `lib/` modules are tested - they are pure functions with no GNOME Shell dependencies. The main `extension.js` cannot be tested outside GNOME Shell.
+Only `lib/` modules are tested - they are pure functions with no GNOME Shell dependencies. `ui/` (needs St/Clutter) and `service/` (needs ECal/EDataServer) cannot be tested outside their respective processes.
 
 ### Manual Diagnostics
 
@@ -134,6 +140,8 @@ This creates `chronome@herzog.tech.zip` containing:
 - `prefs.js`
 - `stylesheet.css`
 - `lib/` (all utility modules)
+- `service/` (service-process modules)
+- `ui/` (shell-process modules)
 - `schemas/org.gnome.shell.extensions.chronome.gschema.xml`
 
 **Note:** Compiled schema (`gschemas.compiled`) is NOT included - extensions.gnome.org compiles it during review.
@@ -164,13 +172,15 @@ Automatically attaches a release zip when a GitHub Release is published:
 The extension uses a split architecture to keep heavy computation out of the GNOME Shell process:
 
 ```
-extension.js  (UI layer, runs inside GNOME Shell)
+extension.js  (entry point, runs inside GNOME Shell)
     │  Spawns on enable(), kills on disable()
     │  D-Bus proxy ← EventsChanged signal
+    │  └── ui/indicator.js  (panel button, menu, countdown — St/Clutter live here only)
     ▼
 service.js  (computation layer, runs as subprocess)
     │  Owns EDS connections, processes events
     │  Emits EventsChanged with JSON payload
+    │  └── service/  (EDS querying and component property helpers)
     ▼
 lib/  (shared pure modules, used by both)
 ```
@@ -199,18 +209,26 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 
 ### Core Files
 
-- **extension.js**: Thin UI layer with `ChronomeIndicator` class (PanelMenu.Button subclass) that handles:
+- **extension.js**: Entry point (`ChronomeExtension`), kept deliberately small so the cleanup is easy to review:
+  - Subprocess lifecycle (spawn on enable, kill on disable, auto-restart with backoff)
+  - D-Bus proxy for communicating with the service
+  - Creates/destroys the `ChronomeIndicator` from `ui/indicator.js`
+
+- **ui/indicator.js**: `ChronomeIndicator` class (PanelMenu.Button subclass), loaded only by the Shell process:
   - Panel label updates with countdown timers
   - Dropdown menu with today's events (from pre-computed JSON)
-  - D-Bus proxy for communicating with the service
-  - Subprocess lifecycle (spawn on enable, kill on disable, auto-restart)
+  - Settings signal connections for display-only settings
 
-- **service.js**: D-Bus service that handles:
+- **service.js**: D-Bus service entry point that handles:
   - Calendar data fetching via ECal/EDataServer async APIs
-  - Event analysis (PARTSTAT, all-day detection, video link detection)
   - Event deduplication and next meeting selection
   - JSON serialization and D-Bus signal emission
   - GSettings monitoring for data-affecting settings
+
+- **service/**: Modules loaded only by the service process:
+  - `eventProperties.js` - Component property readers, PARTSTAT participation, all-day detection, video link detection, wrapping `ICalGLib.Component` into plain event wrappers
+  - `eventQuery.js` - `generate_instances_sync` wrapping, the rescheduled-instance map, per-source event querying
+  - `asyncResult.js` - `unwrapAsyncResult()` for promisified EDS return shapes
 
 - **prefs.js**: Preferences window using Adw (libadwaita) with pages for General, Appearance, and Calendars settings
 
@@ -232,10 +250,14 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 - `SYNC_DELAY_MS: 50` - Delay between calendar sync requests
 
 **extension.js:**
+- `SERVICE_RESTART_DELAY_SEC: 2` - Initial delay before auto-restarting a dead service
+- `SERVICE_RESTART_MAX_DELAY_SEC: 60` - Upper bound on the restart backoff
+- `SERVICE_HEALTHY_UPTIME_MS: 60000` - Uptime after which a child counts as healthy and the backoff resets
+
+**ui/indicator.js:**
 - `OPACITY_DIMMED: 178` (~70%) - Opacity for past/declined events
 - `OPACITY_TENTATIVE: 204` (~80%) - Opacity for tentative events
 - `MENU_ICON_SIZE: 16` - Icon size in dropdown menu
-- `SERVICE_RESTART_DELAY_SEC: 2` - Delay before auto-restarting dead service
 
 ### Key Technical Details
 
@@ -243,7 +265,7 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 - Imports from `gi://` for GObject introspection bindings (ECal, EDataServer, St, Clutter, etc.)
 - Async calendar operations use Promise wrappers around EDS callback-based APIs
 - Blocking operations wrapped in `GLib.idle_add()` to avoid freezing the service main loop
-- Real-time countdown uses `GLib.timeout_add_seconds` timers in extension.js
+- Real-time countdown uses `GLib.timeout_add_seconds` timers in ui/indicator.js
 - Calendar change notifications via `ECalClientView` signals with debounced refresh in service
 - Rescheduled instance detection uses per-source caching with automatic invalidation
 - Video link detection uses regex patterns from MeetingBar project
@@ -252,6 +274,9 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 
 Custom CSS classes:
 - `.chronome-current-event` - Highlights ongoing events in the menu with subtle blue background
+- `.chronome-color-bar` - Colored left border showing the source calendar's color
+- `.chronome-time-label` / `.chronome-time-label-wide` - Fixed-width time column in the menu (wide variant when end times are shown)
+- `.chronome-video-icon` - Spacing for the video conference link icon
 
 ## Utility Modules (`lib/`)
 
@@ -275,7 +300,9 @@ Time constants in milliseconds:
 - `getEventDedupeKey(event, getEventStart)` - Generate UID:timestamp key
 - `deduplicateEvents(events, getEventStart)` - Remove duplicates, prefer exceptions
 - `isAllDayEventHeuristic(startTime, endTime)` - Detect all-day events
+- `getCurrentMeetings(events, options)` - Ongoing meetings with at least `minRemainingMs` left, sorted by end time
 - `getNextMeeting(events, options)` - Select next/current meeting with filtering
+- `sortEventsByStartTime(events, getEventStart)` - Sort in place by start time
 
 ### `icalParser.js`
 - `extractIcalProperty(icalStr, propName)` - Extract raw property from iCal
@@ -294,6 +321,35 @@ Time constants in milliseconds:
 - `findMeetingUrl(text)` - Find video conference URL in text
 - Supports 40+ services: Zoom, Teams, Meet, Webex, Jitsi, etc.
 - Patterns from MeetingBar project
+
+## Shell UI Modules (`ui/`)
+
+Loaded only by the GNOME Shell process. These may import `St`, `Clutter`, `PanelMenu` and `PopupMenu`; nothing here may ever be imported by `prefs.js` or `service.js`.
+
+### `indicator.js`
+- `ChronomeIndicator` - `PanelMenu.Button` subclass owning the panel label, icon, dropdown menu, the one-second countdown timer, and its own settings signal connections. All of it is torn down in `destroy()`.
+
+## Service Modules (`service/`)
+
+Loaded only by the service subprocess. These may import `ECal`/`EDataServer`/`ICalGLib`; nothing here may ever be imported by the Shell process.
+
+### `asyncResult.js`
+- `unwrapAsyncResult(result)` - Normalize promisified EDS return shapes (see "Promisified EDS Results" below)
+
+### `eventProperties.js`
+- `icalTimeToTimestamp(icalTime)` - `ICalGLib.Time` → epoch milliseconds
+- `getEventStart(event)` / `getEventEnd(event)` - Instance times, falling back to DTSTART + 1h
+- `getPropertyString(event, methodName)` / `getEventTitle(event)` - Safe component property reads
+- `isAllDayEvent(event)` - `dtStart.is_date()` check
+- `hasCurrentUserPartstat(event, targetPartstat)` - Attendee PARTSTAT lookup for the account's own address
+- `isDeclinedEvent(event)` / `isTentativeEvent(event)` / `isNeedsResponseEvent(event)`
+- `findVideoLink(event)` - Video conference URL from location, then description
+- `wrapICalComponent(comp, instanceStartMs, instanceEndMs, accountEmail, calendarColor, recurrenceIdStartMs)` - Wrap a component with its instance times and metadata
+
+### `eventQuery.js`
+- `generateInstancesAsync(service, client, startTimet, endTimet, cancellable)` - `generate_instances_sync()` deferred through `GLib.idle_add()`
+- `buildRescheduledMapAsync(service, client, sourceUid, todayDateStr)` - Phase 1 of the two-phase query (see "Two-Phase Query Architecture")
+- `queryEventsAsync(service, client, sourceUid)` - Full per-source event query
 
 ## GSettings Keys Reference
 
@@ -326,7 +382,7 @@ Time constants in milliseconds:
 
 ### Import Patterns
 
-**GNOME Shell Resources (extension.js only):**
+**GNOME Shell Resources (Shell process only — `extension.js` and `ui/`):**
 ```javascript
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -346,6 +402,7 @@ import ECal from 'gi://ECal?version=2.0';
 **Local modules:**
 ```javascript
 import {functionName} from './lib/moduleName.js';
+import {functionName} from '../lib/moduleName.js';  // from ui/ or service/
 ```
 
 ### Naming Conventions
@@ -397,7 +454,7 @@ This silently broke two call sites: `get_object_list_as_comps` (the `rescheduled
 ### GLib Timer Management
 
 - Use `GLib.timeout_add_seconds()` not `setTimeout()`
-- **extension.js**: Display timer removed in `destroy()`, restart timeout removed in `disable()`
+- **ui/indicator.js**: Display timer removed in `destroy()`; **extension.js**: restart timeout removed in `disable()`
 - **service.js**: ALL GLib sources must be removed in `_shutdown()`. Named timers (fetch, debounce) tracked individually. Fire-and-forget sources use `this._sourceIds` Set:
   ```javascript
   const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
@@ -435,7 +492,7 @@ Methods differ:
 ### Settings Signal Cleanup
 
 Always disconnect settings signals during cleanup:
-- **extension.js**: In `destroy()` of `ChronomeIndicator`
+- **ui/indicator.js**: In `destroy()` of `ChronomeIndicator`
 - **service.js**: In `_shutdown()`
 
 ```javascript
@@ -544,7 +601,7 @@ The `generate_instances_sync` callback signature is:
 ```
 
 - `comp`: `ICalGLib.Component` - the event component (may be modified!)
-- `instanceStart`: `ICalGLib.Time` object (NOT a number!) - must convert with `_icalTimeToTimestamp()`
+- `instanceStart`: `ICalGLib.Time` object (NOT a number!) - must convert with `icalTimeToTimestamp()` (service/eventProperties.js)
 - `instanceEnd`: `ICalGLib.Time` object (NOT a number!)
 
 ### When to Show vs Skip Detached Instances

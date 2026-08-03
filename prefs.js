@@ -11,14 +11,19 @@ export default class ChronomePreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
-        // Add General page
         window.add(this._buildGeneralPage(settings));
 
-        // Add Appearance page
         window.add(this._buildAppearancePage(settings));
 
-        // Add Calendars page
         window.add(this._buildCalendarsPage(settings));
+    }
+
+    _addSwitchRows(group, settings, rows) {
+        for (const {key, title, subtitle} of rows) {
+            const row = new Adw.SwitchRow({title, subtitle});
+            settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
+            group.add(row);
+        }
     }
 
     _buildGeneralPage(settings) {
@@ -27,28 +32,15 @@ export default class ChronomePreferences extends ExtensionPreferences {
             icon_name: 'preferences-system-symbolic',
         });
 
-        // Settings group
         const settingsGroup = new Adw.PreferencesGroup({
             title: _('Behavior'),
         });
 
-        // Real-time countdown
-        const realTimeRow = new Adw.SwitchRow({
-            title: _('Real-time Countdown'),
-            subtitle: _('Update countdown every second'),
-        });
-        settings.bind('real-time-countdown', realTimeRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        settingsGroup.add(realTimeRow);
+        this._addSwitchRows(settingsGroup, settings, [
+            {key: 'real-time-countdown', title: _('Real-time Countdown'), subtitle: _('Update countdown every second')},
+            {key: 'show-current-meeting', title: _('Show Current Meeting'), subtitle: _('Display ongoing meetings in the panel')},
+        ]);
 
-        // Show current meeting
-        const showCurrentRow = new Adw.SwitchRow({
-            title: _('Show Current Meeting'),
-            subtitle: _('Display ongoing meetings in the panel'),
-        });
-        settings.bind('show-current-meeting', showCurrentRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        settingsGroup.add(showCurrentRow);
-
-        // Refresh interval
         const refreshRow = new Adw.SpinRow({
             title: _('Refresh Interval'),
             subtitle: _('How often to fetch calendar data (seconds)'),
@@ -62,25 +54,13 @@ export default class ChronomePreferences extends ExtensionPreferences {
         settings.bind('refresh-interval', refreshRow, 'value', Gio.SettingsBindFlags.DEFAULT);
         settingsGroup.add(refreshRow);
 
-        // Show past events
-        const showPastRow = new Adw.SwitchRow({
-            title: _('Show Past Events'),
-            subtitle: _('Include completed events in the menu'),
-        });
-        settings.bind('show-past-events', showPastRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        settingsGroup.add(showPastRow);
-
-        // Show event end time
-        const showEndTimeRow = new Adw.SwitchRow({
-            title: _('Show Event End Time'),
-            subtitle: _('Display end time alongside start time'),
-        });
-        settings.bind('show-event-end-time', showEndTimeRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        settingsGroup.add(showEndTimeRow);
+        this._addSwitchRows(settingsGroup, settings, [
+            {key: 'show-past-events', title: _('Show Past Events'), subtitle: _('Include completed events in the menu')},
+            {key: 'show-event-end-time', title: _('Show Event End Time'), subtitle: _('Display end time alongside start time')},
+        ]);
 
         page.add(settingsGroup);
 
-        // About group
         const aboutGroup = new Adw.PreferencesGroup({
             title: _('About'),
         });
@@ -106,12 +86,12 @@ export default class ChronomePreferences extends ExtensionPreferences {
             icon_name: 'applications-graphics-symbolic',
         });
 
-        // Display group
         const displayGroup = new Adw.PreferencesGroup({
             title: _('Display'),
         });
 
-        // Time format
+        const TIME_FORMATS = ['12h', '24h'];
+
         const timeFormatModel = new Gtk.StringList();
         timeFormatModel.append(_('12-hour (1:30 PM)'));
         timeFormatModel.append(_('24-hour (13:30)'));
@@ -123,14 +103,17 @@ export default class ChronomePreferences extends ExtensionPreferences {
         });
 
         const timeValue = settings.get_string('time-format');
-        timeFormatRow.set_selected(timeValue === '24h' ? 1 : 0);
+        timeFormatRow.set_selected(Math.max(0, TIME_FORMATS.indexOf(timeValue)));
 
         timeFormatRow.connect('notify::selected', () => {
-            settings.set_string('time-format', timeFormatRow.selected === 1 ? '24h' : '12h');
+            // AdwComboRow.selected is GTK_INVALID_LIST_POSITION when nothing is selected
+            settings.set_string('time-format',
+                TIME_FORMATS[Math.min(timeFormatRow.selected, TIME_FORMATS.length - 1)]);
         });
         displayGroup.add(timeFormatRow);
 
-        // Status bar icon
+        const ICON_TYPES = ['calendar', 'meeting-type', 'none'];
+
         const iconTypeModel = new Gtk.StringList();
         iconTypeModel.append(_('Calendar Icon'));
         iconTypeModel.append(_('Meeting Type Icon'));
@@ -143,16 +126,14 @@ export default class ChronomePreferences extends ExtensionPreferences {
         });
 
         const iconValue = settings.get_string('status-bar-icon-type');
-        const iconMap = {'calendar': 0, 'meeting-type': 1, 'none': 2};
-        iconTypeRow.set_selected(iconMap[iconValue] ?? 0);
+        iconTypeRow.set_selected(Math.max(0, ICON_TYPES.indexOf(iconValue)));
 
         iconTypeRow.connect('notify::selected', () => {
-            const values = ['calendar', 'meeting-type', 'none'];
-            settings.set_string('status-bar-icon-type', values[iconTypeRow.selected]);
+            settings.set_string('status-bar-icon-type',
+                ICON_TYPES[Math.min(iconTypeRow.selected, ICON_TYPES.length - 1)]);
         });
         displayGroup.add(iconTypeRow);
 
-        // Event title length
         const titleLengthRow = new Adw.SpinRow({
             title: _('Maximum Title Length'),
             subtitle: _('Truncate long event titles'),
@@ -166,17 +147,12 @@ export default class ChronomePreferences extends ExtensionPreferences {
         settings.bind('event-title-length', titleLengthRow, 'value', Gio.SettingsBindFlags.DEFAULT);
         displayGroup.add(titleLengthRow);
 
-        // Use calendar colors
-        const calendarColorsRow = new Adw.SwitchRow({
-            title: _('Use Calendar Colors'),
-            subtitle: _('Show colored border based on calendar'),
-        });
-        settings.bind('use-calendar-colors', calendarColorsRow, 'active', Gio.SettingsBindFlags.DEFAULT);
-        displayGroup.add(calendarColorsRow);
+        this._addSwitchRows(displayGroup, settings, [
+            {key: 'use-calendar-colors', title: _('Use Calendar Colors'), subtitle: _('Show colored border based on calendar')},
+        ]);
 
         page.add(displayGroup);
 
-        // Event types group
         const eventTypesGroup = new Adw.PreferencesGroup({
             title: _('Event Types'),
             description: _('Choose which types of events to display'),
@@ -184,59 +160,41 @@ export default class ChronomePreferences extends ExtensionPreferences {
 
         const eventTypes = settings.get_strv('event-types');
 
-        // All-day events
-        const allDayRow = new Adw.SwitchRow({
-            title: _('All-day Events'),
-            active: eventTypes.includes('all-day'),
-        });
-        allDayRow.connect('notify::active', () => {
-            this._updateEventTypes(settings, 'all-day', allDayRow.active);
-        });
-        eventTypesGroup.add(allDayRow);
+        const eventTypeRows = [
+            {key: 'all-day', title: _('All-day Events')},
+            {key: 'regular', title: _('Regular Events')},
+            {key: 'declined', title: _('Declined Events')},
+            {key: 'tentative', title: _('Tentative Events')},
+        ];
 
-        // Regular events
-        const regularRow = new Adw.SwitchRow({
-            title: _('Regular Events'),
-            active: eventTypes.includes('regular'),
-        });
-        regularRow.connect('notify::active', () => {
-            this._updateEventTypes(settings, 'regular', regularRow.active);
-        });
-        eventTypesGroup.add(regularRow);
-
-        // Declined events
-        const declinedRow = new Adw.SwitchRow({
-            title: _('Declined Events'),
-            active: eventTypes.includes('declined'),
-        });
-        declinedRow.connect('notify::active', () => {
-            this._updateEventTypes(settings, 'declined', declinedRow.active);
-        });
-        eventTypesGroup.add(declinedRow);
-
-        // Tentative events
-        const tentativeRow = new Adw.SwitchRow({
-            title: _('Tentative Events'),
-            active: eventTypes.includes('tentative'),
-        });
-        tentativeRow.connect('notify::active', () => {
-            this._updateEventTypes(settings, 'tentative', tentativeRow.active);
-        });
-        eventTypesGroup.add(tentativeRow);
+        for (const {key, title} of eventTypeRows) {
+            const row = new Adw.SwitchRow({
+                title,
+                active: eventTypes.includes(key),
+            });
+            row.connect('notify::active', () => {
+                this._updateEventTypes(settings, key, row.active);
+            });
+            eventTypesGroup.add(row);
+        }
 
         page.add(eventTypesGroup);
 
         return page;
     }
 
-    _updateEventTypes(settings, eventType, enabled) {
-        let types = settings.get_strv('event-types');
-        if (enabled && !types.includes(eventType)) {
-            types.push(eventType);
+    _toggleStrvMember(settings, key, value, enabled) {
+        let values = settings.get_strv(key);
+        if (enabled && !values.includes(value)) {
+            values.push(value);
         } else if (!enabled) {
-            types = types.filter(t => t !== eventType);
+            values = values.filter(v => v !== value);
         }
-        settings.set_strv('event-types', types);
+        settings.set_strv(key, values);
+    }
+
+    _updateEventTypes(settings, eventType, enabled) {
+        this._toggleStrvMember(settings, 'event-types', eventType, enabled);
     }
 
     _buildCalendarsPage(settings) {
@@ -250,7 +208,6 @@ export default class ChronomePreferences extends ExtensionPreferences {
             description: _('Select which calendars to show. Leave all unchecked to show all calendars.'),
         });
 
-        // Add loading indicator
         const loadingRow = new Adw.ActionRow({
             title: _('Loading calendars...'),
         });
@@ -261,7 +218,6 @@ export default class ChronomePreferences extends ExtensionPreferences {
 
         page.add(calendarsGroup);
 
-        // Load registry asynchronously
         EDataServer.SourceRegistry.new(null, (obj, res) => {
             // Check if prefs window was closed before callback fired
             if (!calendarsGroup.get_parent()) {
@@ -277,6 +233,7 @@ export default class ChronomePreferences extends ExtensionPreferences {
                 const errorRow = new Adw.ActionRow({
                     title: _('Could not load calendars'),
                     subtitle: e.message,
+                    use_markup: false,
                 });
                 calendarsGroup.add(errorRow);
                 return;
@@ -285,13 +242,11 @@ export default class ChronomePreferences extends ExtensionPreferences {
             const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
             const enabledCalendars = settings.get_strv('enabled-calendars');
 
-            // Filter to enabled sources
             const enabledSources = sources.filter(s => s.get_enabled());
 
             // Deduplicate sources by calendar ID (keeps owner's version for shared calendars)
             const dedupedSources = deduplicateSources(enabledSources, registry);
 
-            // Sort by display name
             const sortedSources = dedupedSources.sort((a, b) =>
                 a.get_display_name().localeCompare(b.get_display_name()));
 
@@ -315,13 +270,7 @@ export default class ChronomePreferences extends ExtensionPreferences {
                 });
 
                 calendarRow.connect('notify::active', () => {
-                    let current = settings.get_strv('enabled-calendars');
-                    if (calendarRow.active && !current.includes(sourceUid)) {
-                        current.push(sourceUid);
-                    } else if (!calendarRow.active) {
-                        current = current.filter(id => id !== sourceUid);
-                    }
-                    settings.set_strv('enabled-calendars', current);
+                    this._toggleStrvMember(settings, 'enabled-calendars', sourceUid, calendarRow.active);
                 });
 
                 calendarsGroup.add(calendarRow);

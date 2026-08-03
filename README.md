@@ -23,9 +23,13 @@ Chronome has been submitted to [extensions.gnome.org](https://extensions.gnome.o
 ```bash
 # Clone the repository
 git clone https://github.com/leoherzog/Chronome.git
+cd Chronome
 
-# Copy to GNOME Shell extensions directory
-cp -r Chronome ~/.local/share/gnome-shell/extensions/chronome@herzog.tech/
+# Build the extension zip (contains only the files that actually ship)
+./release.sh
+
+# Install it (--force replaces any previous install)
+gnome-extensions install --force chronome@herzog.tech.zip
 
 # Compile the settings schema
 glib-compile-schemas ~/.local/share/gnome-shell/extensions/chronome@herzog.tech/schemas/

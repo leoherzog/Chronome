@@ -57,7 +57,10 @@
         <choice value="none"/>
       </choices>
       <summary>Status bar icon type</summary>
-      <description>Type of icon to display next to the event summary when there is an upcoming meeting (calendar, meeting-type, none). A calendar icon is always shown when there are no events.</description>
+      <description>
+        Type of icon to display next to the event summary when there is an upcoming meeting
+        (calendar, meeting-type, none). A calendar icon is always shown when there are no events.
+      </description>
     </key>
 
     <key name="show-current-meeting" type="b">

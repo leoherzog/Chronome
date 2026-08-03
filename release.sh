@@ -19,6 +19,8 @@ zip -r "$OUTPUT_FILE" \
     prefs.js \
     stylesheet.css \
     lib/ \
+    service/ \
+    ui/ \
     schemas/org.gnome.shell.extensions.chronome.gschema.xml
 
 echo "Created $OUTPUT_FILE"
