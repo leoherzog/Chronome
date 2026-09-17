@@ -11,8 +11,8 @@ import ECal from 'gi://ECal?version=2.0';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
 import {getAccountEmailForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';
+import {DBUS_NAME, DBUS_PATH, DBUS_IFACE_XML} from './lib/dbusInterface.js';
 import {deduplicateEvents, getNextMeeting as getNextMeetingPure} from './lib/eventUtils.js';
-import {unwrapAsyncResult} from './service/asyncResult.js';
 import {
     getEventStart, getEventEnd, getEventTitle, findVideoLink,
     isAllDayEvent, isDeclinedEvent, isTentativeEvent, isNeedsResponseEvent,
@@ -25,24 +25,6 @@ Gio._promisify(ECal.Client.prototype, 'get_object_list_as_comps', 'get_object_li
 Gio._promisify(ECal.Client.prototype, 'get_view', 'get_view_finish');
 Gio._promisify(EDataServer.SourceRegistry, 'new', 'new_finish');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
-
-const DBUS_NAME = 'tech.herzog.Chronome1';
-const DBUS_PATH = '/tech/herzog/Chronome';
-const DBUS_IFACE = `
-<node>
-  <interface name="${DBUS_NAME}">
-    <method name="GetEvents">
-      <arg type="s" direction="out" name="json"/>
-    </method>
-    <method name="Refresh"/>
-    <method name="Ping">
-      <arg type="b" direction="out" name="alive"/>
-    </method>
-    <signal name="EventsChanged">
-      <arg type="s" name="json"/>
-    </signal>
-  </interface>
-</node>`;
 
 const CONSTANTS = {
     DEBOUNCE_MS: 500,
@@ -91,15 +73,9 @@ class ChronomeService {
         this._refreshInProgress = false;
         this._pendingRefresh = false;
         this._refreshDebounceId = null;
+        // Cancelled, never replaced, by _shutdown().
         this._cancellable = new Gio.Cancellable();
         this._sourceIds = new Set();
-        // Not a widget lifecycle flag: this is a standalone daemon, so
-        // `_shutdown()` does not destroy this object -- the process exits
-        // instead. `_cancellable` cannot stand in for the flag either, because
-        // `_shutdown()` nulls it and GIO treats a null cancellable as "no
-        // cancellable", so async continuations already in flight would keep
-        // running uncancelled. Every one of them checks this flag first.
-        this._shuttingDown = false;
 
         this._lastJson = '{"nextMeeting":null,"events":[]}';
 
@@ -110,6 +86,10 @@ class ChronomeService {
 
         this._sigtermSourceId = 0;
         this._sigintSourceId = 0;
+        this._stdinStream = null;
+        this._loop = null;
+
+        this._registrySignals = [];
 
         this._settingsSignals = [];
         const dataSettings = ['enabled-calendars', 'event-types', 'show-current-meeting', 'refresh-interval'];
@@ -148,6 +128,8 @@ class ChronomeService {
             this._shutdown();
             return GLib.SOURCE_REMOVE;
         };
+        // GLibUnix.signal_add and GioUnix.InputStream (see _watchParent) need GLib 2.80, so the
+        // deprecated aliases stay while metadata.json still claims GNOME 45.
         this._sigtermSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15 /* SIGTERM */, onSignal);
         this._sigintSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 2 /* SIGINT */, onSignal);
 
@@ -158,7 +140,7 @@ class ChronomeService {
         this._stdinStream ??= Gio.UnixInputStream.new(0, false);
         this._stdinStream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, this._cancellable)
             .then(bytes => {
-                if (this._shuttingDown) return;
+                if (this._cancellable.is_cancelled()) return;
                 if (!bytes || bytes.get_size() === 0) {
                     this._shutdown();
                     return;
@@ -166,18 +148,14 @@ class ChronomeService {
                 this._watchParent();
             })
             .catch(e => {
-                if (this._shuttingDown) return;
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
                 this._shutdown();
             });
     }
 
     _shutdown() {
-        if (this._shuttingDown) return;
-        this._shuttingDown = true;
-
+        if (this._cancellable.is_cancelled()) return;
         this._cancellable.cancel();
-        this._cancellable = null;
 
         this._stopFetchTimer();
 
@@ -195,20 +173,15 @@ class ChronomeService {
             this._sigintSourceId = 0;
         }
 
-        if (this._sourceIds) {
-            for (const id of this._sourceIds)
-                GLib.Source.remove(id);
-            this._sourceIds.clear();
-            this._sourceIds = null;
-        }
+        for (const id of this._sourceIds)
+            GLib.Source.remove(id);
+        this._sourceIds.clear();
 
-        if (this._settings && this._settingsSignals) {
-            for (const id of this._settingsSignals)
-                this._settings.disconnect(id);
-            this._settingsSignals = null;
-        }
+        for (const id of this._settingsSignals)
+            this._settings.disconnect(id);
 
-        this._disconnectEdsSignals();
+        for (const id of this._registrySignals)
+            this._registry.disconnect(id);
 
         for (const [, viewData] of this._clientViews.entries())
             this._teardownClientView(viewData);
@@ -234,22 +207,34 @@ class ChronomeService {
         this._loop.quit();
     }
 
-    _disconnectEdsSignals() {
-        if (!this._registry) return;
-
-        const signalFields = ['_registryChangedSignalId', '_registryAddedSignalId', '_registryRemovedSignalId'];
-        for (const field of signalFields) {
-            if (this[field]) {
-                this._registry.disconnect(this[field]);
-                this[field] = null;
-            }
+    // e_cal_client_view_stop() is a synchronous D-Bus call into the calendar
+    // backend and raises a GError once that backend is gone.
+    _stopView(view) {
+        try {
+            view.stop();
+        } catch (e) {
+            console.debug(`Chronome service: stopping client view failed: ${e.message}`);
         }
     }
 
     _teardownClientView(viewData) {
-        viewData.view.stop();
+        this._stopView(viewData.view);
         for (const sig of viewData.signals)
             sig.obj.disconnect(sig.id);
+    }
+
+    _dropSource(sourceUid) {
+        const viewData = this._clientViews.get(sourceUid);
+        if (viewData) {
+            this._teardownClientView(viewData);
+            this._clientViews.delete(sourceUid);
+        }
+
+        this._clients.delete(sourceUid);
+        this._accountEmails.delete(sourceUid);
+        this._calendarReadonly.delete(sourceUid);
+        this._calendarColors.delete(sourceUid);
+        this._rescheduledCache.delete(sourceUid);
     }
 
     _getSourceMetadata(sourceUid) {
@@ -274,7 +259,7 @@ class ChronomeService {
     // --- D-Bus ---
 
     _onBusAcquired(connection) {
-        this._exportedObject = Gio.DBusExportedObject.wrapJSObject(DBUS_IFACE, this);
+        this._exportedObject = Gio.DBusExportedObject.wrapJSObject(DBUS_IFACE_XML, this);
         this._exportedObject.export(connection, DBUS_PATH);
     }
 
@@ -317,7 +302,7 @@ class ChronomeService {
     // --- Refresh pipeline ---
 
     _refreshEvents() {
-        if (this._shuttingDown) return;
+        if (this._cancellable.is_cancelled()) return;
 
         if (this._refreshInProgress) {
             this._pendingRefresh = true;
@@ -328,7 +313,7 @@ class ChronomeService {
         this._pendingRefresh = false;
 
         this._fetchAllEventsAsync().then(allEvents => {
-            if (this._shuttingDown) return;
+            if (this._cancellable.is_cancelled()) return;
 
             const json = this._computeEventData(allEvents);
             this._lastJson = json;
@@ -338,19 +323,19 @@ class ChronomeService {
         }).finally(() => {
             this._refreshInProgress = false;
 
-            if (this._pendingRefresh && !this._shuttingDown) {
+            if (this._pendingRefresh && !this._cancellable.is_cancelled()) {
                 const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                    this._sourceIds?.delete(id);
-                    if (!this._shuttingDown) this._refreshEvents();
+                    this._sourceIds.delete(id);
+                    this._refreshEvents();
                     return GLib.SOURCE_REMOVE;
                 });
-                this._sourceIds?.add(id);
+                this._sourceIds.add(id);
             }
         });
     }
 
     _computeEventData(allEvents) {
-        if (!allEvents || allEvents.length === 0)
+        if (allEvents.length === 0)
             return '{"nextMeeting":null,"events":[]}';
 
         const deduped = deduplicateEvents(allEvents, getEventStart);
@@ -396,24 +381,22 @@ class ChronomeService {
         const clients = Array.from(this._clients.values());
 
         for (const client of clients) {
-            if (this._shuttingDown) return;
+            if (this._cancellable.is_cancelled()) return;
 
             await new Promise(r => {
                 const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.SYNC_DELAY_MS, () => {
-                    this._sourceIds?.delete(id);
+                    this._sourceIds.delete(id);
                     r();
                     return GLib.SOURCE_REMOVE;
                 });
-                this._sourceIds?.add(id);
+                this._sourceIds.add(id);
             });
-
-            if (this._shuttingDown) return;
 
             try {
                 await client.refresh(this._cancellable);
             } catch (e) {
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
-                if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED))
+                if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+                if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED))
                     console.debug(`Chronome service: Calendar sync failed: ${e.message}`);
             }
         }
@@ -422,31 +405,27 @@ class ChronomeService {
     // --- EDS pipeline ---
 
     async _ensureRegistryAsync() {
-        if (this._shuttingDown) return null;
         if (this._registry) return this._registry;
 
         try {
             const registry = await EDataServer.SourceRegistry.new(this._cancellable);
-            if (this._shuttingDown) return null;
+            if (this._cancellable.is_cancelled()) return null;
             this._registry = registry;
 
-            this._registryChangedSignalId = this._registry.connect('source-changed',
-                (_reg, src) => this._onCalendarSourceChanged(src));
-            this._registryAddedSignalId = this._registry.connect('source-added',
-                (_reg, src) => this._onCalendarSourceChanged(src));
-            this._registryRemovedSignalId = this._registry.connect('source-removed',
-                (_reg, src) => this._onCalendarSourceChanged(src));
+            for (const signal of ['source-changed', 'source-added', 'source-removed']) {
+                this._registrySignals.push(this._registry.connect(signal,
+                    (_reg, src) => this._onCalendarSourceChanged(src)));
+            }
 
             return this._registry;
         } catch (e) {
-            if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+            if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                 console.error(`Chronome service: Failed to create SourceRegistry: ${e}`);
             return null;
         }
     }
 
     async _connectClientAsync(source, sourceUid) {
-        if (this._shuttingDown) return null;
         if (this._clients.has(sourceUid))
             return this._clients.get(sourceUid);
 
@@ -456,7 +435,7 @@ class ChronomeService {
                 CONSTANTS.CLIENT_CONNECT_TIMEOUT_SEC,
                 this._cancellable
             );
-            if (this._shuttingDown) return null;
+            if (this._cancellable.is_cancelled()) return null;
 
             this._clients.set(sourceUid, client);
             this._sourceFailures.delete(sourceUid);
@@ -469,20 +448,18 @@ class ChronomeService {
 
             return client;
         } catch (e) {
-            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return null;
+            if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return null;
             this._logSourceFailure(sourceUid, `Chronome service: Failed to connect to calendar: ${e}`);
             return null;
         }
     }
 
     async _fetchAllEventsAsync() {
-        if (this._shuttingDown) return [];
-
         const registry = await this._ensureRegistryAsync();
         if (!registry) return [];
 
         const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR);
-        if (!sources || sources.length === 0) return [];
+        if (sources.length === 0) return [];
 
         const enabledCalendars = this._settings.get_strv('enabled-calendars');
         const filteredSources = enabledCalendars.length > 0
@@ -490,6 +467,11 @@ class ChronomeService {
             : sources;
 
         const enabledSources = filteredSources.filter(source => source.get_enabled());
+
+        const wanted = new Set(enabledSources.map(s => s.get_uid()));
+        for (const uid of this._clients.keys()) {
+            if (!wanted.has(uid)) this._dropSource(uid);
+        }
 
         const connectPromises = enabledSources.map(async (source) => {
             const client = await this._connectClientAsync(source, source.get_uid());
@@ -514,19 +496,19 @@ class ChronomeService {
     // --- EDS change notifications ---
 
     async _setupClientViewAsync(client, sourceUid) {
-        if (!client || this._shuttingDown) return;
-
         // '#t' matches every component. A narrower (occur-in-time-range? ...)
         // query would also filter which changes emit objects-added/modified/
         // removed signals, so edits to events outside the window would not
         // trigger a refresh and the UI would drift stale until the next poll.
         let view;
         try {
-            view = unwrapAsyncResult(await client.get_view('#t', this._cancellable));
+            [view] = await client.get_view('#t', this._cancellable);
             if (!view) return;
 
-            if (this._shuttingDown) {
-                view.stop();
+            // `_shutdown()` clears `_clients`, so this also catches a setup
+            // that outlived the service or its source.
+            if (this._clients.get(sourceUid) !== client) {
+                this._stopView(view);
                 return;
             }
 
@@ -541,14 +523,14 @@ class ChronomeService {
         } catch (e) {
             // A view that was created but not registered would otherwise be
             // left running with nothing able to stop it.
-            if (view) view.stop();
-            if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+            if (view) this._stopView(view);
+            if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
             this._logSourceFailure(sourceUid, `Chronome service: Error setting up client view: ${e}`);
         }
     }
 
     _debouncedRefresh() {
-        if (this._shuttingDown) return;
+        if (this._cancellable.is_cancelled()) return;
         if (this._refreshDebounceId)
             GLib.Source.remove(this._refreshDebounceId);
         this._refreshDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.DEBOUNCE_MS, () => {
@@ -559,23 +541,11 @@ class ChronomeService {
     }
 
     _onCalendarSourceChanged(source) {
-        this._rescheduledCache.clear();
-
-        if (source) {
-            const sourceUid = source.get_uid();
-            if (sourceUid) {
-                if (this._clientViews.has(sourceUid)) {
-                    this._teardownClientView(this._clientViews.get(sourceUid));
-                    this._clientViews.delete(sourceUid);
-                }
-
-                this._clients.delete(sourceUid);
-
-                this._accountEmails.delete(sourceUid);
-                this._calendarReadonly.delete(sourceUid);
-                this._calendarColors.delete(sourceUid);
-            }
-        }
+        const sourceUid = source ? source.get_uid() : null;
+        if (sourceUid)
+            this._dropSource(sourceUid);
+        else
+            this._rescheduledCache.clear();
 
         this._debouncedRefresh();
     }

@@ -15,11 +15,13 @@ Chronome/
 ├── prefs.js               # Preferences window (Adw/libadwaita)
 ├── metadata.json          # Extension metadata (UUID, versions, etc.)
 ├── stylesheet.css         # Custom CSS styles
+├── LICENSE                # MIT, shipped in the zip
 ├── release.sh             # Creates zip for extensions.gnome.org
 ├── run-tests.sh           # Test runner script
-├── lib/                   # Utility modules (testable without GNOME Shell)
+├── lib/                   # Process-neutral modules
 │   ├── calendarUtils.js   # EDS source handling, deduplication, colors
 │   ├── constants.js       # Time constants (ONE_HOUR_MS, etc.)
+│   ├── dbusInterface.js   # D-Bus name, object path, interface XML
 │   ├── eventUtils.js      # Event filtering, deduplication, getNextMeeting
 │   ├── formatting.js      # Time/duration formatting, text truncation
 │   ├── icalParser.js      # iCal date/time parsing from raw strings
@@ -27,7 +29,6 @@ Chronome/
 ├── ui/                    # Shell-process-only modules (St/Clutter/PanelMenu)
 │   └── indicator.js       # ChronomeIndicator panel button, menu, countdown timer
 ├── service/               # Service-process-only modules (ECal/EDataServer)
-│   ├── asyncResult.js     # unwrapAsyncResult() for promisified EDS results
 │   ├── eventProperties.js # Component property readers, PARTSTAT, all-day, video links
 │   └── eventQuery.js      # Instance generation, rescheduled map, per-source query
 ├── schemas/
@@ -35,14 +36,15 @@ Chronome/
 ├── tests/
 │   ├── runAll.js          # Test suite entry point
 │   ├── runner.js          # BDD-style test framework (describe/it/expect)
-│   ├── mocks.js           # Mock factories for events, settings, sources
+│   ├── mocks.js           # Mock factory for events
 │   ├── eventUtils.test.js
 │   ├── formatting.test.js
 │   ├── icalParser.test.js
 │   ├── meetingServices.test.js
 │   └── diagnose-rescheduled.js  # Manual live-EDS diagnostic (not in runAll.js)
 └── .github/workflows/
-    └── release.yml        # GitHub Actions release workflow
+    ├── release.yml        # Attaches the release zip to a published GitHub Release
+    └── tests.yml          # Runs ./run-tests.sh on push and pull request
 ```
 
 ## Dependencies and Version Requirements
@@ -56,7 +58,7 @@ Supported versions (from `metadata.json`): **45, 46, 47, 48, 49, 50**
 The extension explicitly requires these versions:
 - `ECal?version=2.0` - Evolution Calendar
 - `EDataServer?version=1.2` - Evolution Data Server
-- `ICalGLib` - iCalendar library; imported **unversioned** on purpose, because libical-glib's GIR version tracks the libical major soversion and libical-4.x distros (e.g. Arch with GNOME 50) ship only `ICalGLib-4.0`. The API surface Chronome uses is identical in 3.0 and 4.0, and since ECal is imported first, EDS's typelib dependencies have already loaded the matching version — the unversioned import reuses it and can never mismatch EDS. Do NOT switch this to a top-level `await import()` fallback: top-level await turns module evaluation into a promise job, and `GLib.MainLoop.run()` in `start()` then starves all promise resolution in the process (GJS can't drain its job queue inside a main loop nested in a job), silently deadlocking the refresh pipeline while sync D-Bus methods keep answering.
+- `ICalGLib` - iCalendar library; imported **unversioned** on purpose, because libical-4.x distros ship only `ICalGLib-4.0`. Every module that imports it imports `ECal?version=2.0` directly above, so the matching version is already loaded. Never replace this with a top-level `await import()` fallback: top-level await turns module evaluation into a promise job, and `GLib.MainLoop.run()` in `start()` then starves all promise resolution, silently deadlocking the refresh pipeline.
 
 ### Runtime Requirements
 
@@ -67,9 +69,6 @@ The extension explicitly requires these versions:
 ## Development Commands
 
 ```bash
-# Compile GSettings schema (required after schema changes)
-glib-compile-schemas schemas/
-
 # Install extension locally for testing (packs only the files that ship)
 ./release.sh && gnome-extensions install --force chronome@herzog.tech.zip
 
@@ -113,17 +112,15 @@ Uses a custom minimal BDD-style test runner (`tests/runner.js`) that runs under 
 
 ### Mock Factories (`tests/mocks.js`)
 
-- `createMockEvent(options)` - Creates mock event objects with iCal strings
-- `createMockSettings(overrides)` - Creates mock GSettings object
-- `createMockSource(options)` - Creates mock EDataServer source
+- `createMockEvent(options)` - Creates a plain event wrapper with `get_uid()`, `get_recurid_as_string()`, and `_instanceStart`/`_instanceEnd` fields
 
 ### Testing Philosophy
 
-Only `lib/` modules are tested - they are pure functions with no GNOME Shell dependencies. `ui/` (needs St/Clutter) and `service/` (needs ECal/EDataServer) cannot be tested outside their respective processes.
+The tested modules are `eventUtils.js`, `formatting.js`, `icalParser.js` and `meetingServices.js`, which need nothing beyond `GLib`. `lib/calendarUtils.js` imports `EDataServer` and is untested. `ui/` (needs St/Clutter) and `service/` (needs ECal/EDataServer) cannot be tested outside their respective processes.
 
 ### Manual Diagnostics
 
-`tests/diagnose-rescheduled.js` is a manual diagnostic (not part of `runAll.js`) that connects to the live Evolution Data Server. Run it with `gjs -m tests/diagnose-rescheduled.js` to inspect how recurring/rescheduled instances behave against real calendar data. It is read-only. Note: `gjs` may print a harmless `Segmentation fault` during interpreter teardown, after all output is complete — a known libical/GJS shutdown crash.
+`tests/diagnose-rescheduled.js` is a manual diagnostic (not part of `runAll.js`) that connects to the live Evolution Data Server. Run it with `gjs -m tests/diagnose-rescheduled.js` to see which detached instances are rescheduled off of today and which of today's expanded occurrences the skip map catches. It is read-only. Note: `gjs` may print a harmless `Segmentation fault` during interpreter teardown, after all output is complete — a known libical/GJS shutdown crash.
 
 ## Release and Packaging
 
@@ -139,12 +136,13 @@ This creates `chronome@herzog.tech.zip` containing:
 - `service.js`
 - `prefs.js`
 - `stylesheet.css`
-- `lib/` (all utility modules)
+- `LICENSE`
+- `lib/`
 - `service/` (service-process modules)
 - `ui/` (shell-process modules)
 - `schemas/org.gnome.shell.extensions.chronome.gschema.xml`
 
-**Note:** Compiled schema (`gschemas.compiled`) is NOT included - extensions.gnome.org compiles it during review.
+**Note:** Compiled schema (`gschemas.compiled`) is NOT included - the Shell runs `glib-compile-schemas` when the extension is installed.
 
 ### Upload Location
 
@@ -165,6 +163,10 @@ Automatically attaches a release zip when a GitHub Release is published:
 2. Create a GitHub Release from the tag
 3. The workflow automatically attaches the extension zip
 
+### Test Workflow (`.github/workflows/tests.yml`)
+
+Installs `gjs` from apt and runs `./run-tests.sh` on every push to `main` and every pull request. `tests/runner.js` exits non-zero on failure, so a red suite fails the job.
+
 ## Architecture
 
 ### Split Architecture: Extension + D-Bus Service
@@ -182,7 +184,7 @@ service.js  (computation layer, runs as subprocess)
     │  Emits EventsChanged with JSON payload
     │  └── service/  (EDS querying and component property helpers)
     ▼
-lib/  (shared pure modules, used by both)
+lib/  (process-neutral modules)
 ```
 
 **D-Bus Interface** (`tech.herzog.Chronome1` on session bus):
@@ -210,13 +212,13 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 ### Core Files
 
 - **extension.js**: Entry point (`ChronomeExtension`), kept deliberately small so the cleanup is easy to review:
-  - Subprocess lifecycle (spawn on enable, kill on disable, auto-restart with backoff)
+  - Subprocess lifecycle (spawn on enable, SIGTERM on disable, auto-restart with backoff)
   - D-Bus proxy for communicating with the service
   - Creates/destroys the `ChronomeIndicator` from `ui/indicator.js`
 
 - **ui/indicator.js**: `ChronomeIndicator` class (PanelMenu.Button subclass), loaded only by the Shell process:
   - Panel label updates with countdown timers
-  - Dropdown menu with today's events (from pre-computed JSON)
+  - Dropdown menu with today's events (from pre-computed JSON), rebuilt on each update while closed and again on open, never while open, so an open menu is not destroyed under the pointer. An empty `PopupMenu` refuses to open, so the closed menu must stay built
   - Settings signal connections for display-only settings
 
 - **service.js**: D-Bus service entry point that handles:
@@ -224,11 +226,11 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
   - Event deduplication and next meeting selection
   - JSON serialization and D-Bus signal emission
   - GSettings monitoring for data-affecting settings
+  - Per-source teardown through `_dropSource(uid)`, which stops the client view via `_stopView(view)` and drops the client, its metadata and its rescheduled cache
 
 - **service/**: Modules loaded only by the service process:
   - `eventProperties.js` - Component property readers, PARTSTAT participation, all-day detection, video link detection, wrapping `ICalGLib.Component` into plain event wrappers
   - `eventQuery.js` - `generate_instances_sync` wrapping, the rescheduled-instance map, per-source event querying
-  - `asyncResult.js` - `unwrapAsyncResult()` for promisified EDS return shapes
 
 - **prefs.js**: Preferences window using Adw (libadwaita) with pages for General, Appearance, and Calendars settings
 
@@ -236,11 +238,11 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 
 ### Service Lifecycle
 
-1. `enable()`: spawns `gjs -m service.js` via `Gio.Subprocess`
+1. `enable()`: spawns `gjs -m service.js` via `Gio.Subprocess` with `STDIN_PIPE`. The write end closes when the Shell process dies, and `_watchParent()` in service.js treats that EOF as parent death.
 2. Service registers on D-Bus, starts EDS connections, emits `EventsChanged`
 3. Extension receives signal, parses JSON, updates UI
-4. `disable()`: `force_exit()` on subprocess, destroy indicator
-5. Auto-restart: `wait_async()` callback detects service death, restarts after 2s
+4. `disable()`: destroys the indicator, then sends SIGTERM so the service runs `_shutdown()`. Do not use `force_exit()`; SIGKILL skips that cleanup.
+5. Auto-restart: `wait_async()` callback detects service death and restarts after 2s, doubling to a 60s cap. The backoff resets once a child has lived 60s.
 
 ### Internal Constants
 
@@ -258,12 +260,13 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 - `OPACITY_DIMMED: 178` (~70%) - Opacity for past/declined events
 - `OPACITY_TENTATIVE: 204` (~80%) - Opacity for tentative events
 - `MENU_ICON_SIZE: 16` - Icon size in dropdown menu
+- `DBUS_CALL_TIMEOUT_MS: 5000` - Timeout for the `GetEvents` and `Refresh` calls
 
 ### Key Technical Details
 
 - Uses GJS (GNOME JavaScript) with ES modules
 - Imports from `gi://` for GObject introspection bindings (ECal, EDataServer, St, Clutter, etc.)
-- Async calendar operations use Promise wrappers around EDS callback-based APIs
+- EDS async calls are promisified with `Gio._promisify` and awaited; `generate_instances_sync` is the exception and runs inside an idle source
 - Blocking operations wrapped in `GLib.idle_add()` to avoid freezing the service main loop
 - Real-time countdown uses `GLib.timeout_add_seconds` timers in ui/indicator.js
 - Calendar change notifications via `ECalClientView` signals with debounced refresh in service
@@ -280,7 +283,10 @@ Custom CSS classes:
 
 ## Utility Modules (`lib/`)
 
-All `lib/` modules are pure functions that can be tested with `gjs -m` outside GNOME Shell.
+`lib/` holds modules that import neither St/Clutter nor ECal/EDataServer; each file's header names the process that loads it. Most of it is pure and testable with `gjs -m` outside GNOME Shell, but `calendarUtils.js` imports `EDataServer` and `icalParser.js` imports `GLib`.
+
+### `dbusInterface.js`
+- `DBUS_NAME`, `DBUS_PATH`, `DBUS_IFACE_XML` - The bus name, object path and interface XML, imported by both `extension.js` and `service.js`. Imports nothing, so either process can load it.
 
 ### `constants.js`
 Time constants in milliseconds:
@@ -307,14 +313,13 @@ Time constants in milliseconds:
 ### `icalParser.js`
 - `extractIcalProperty(icalStr, propName)` - Extract raw property from iCal
 - `parseIcalDateTime(icalStr, propName)` - Parse to timestamp with timezone handling
-- `extractIcalDateString(icalStr, propName)` - Extract YYYYMMDD date portion
 - `resolveTimezone(tzid)` - Resolve a TZID to a `GLib.TimeZone`, working around `GLib.TimeZone.new()`'s silent UTC fallback for globally-unique TZIDs (e.g. `/freeassociation.sourceforge.net/Europe/London`, seen on GNOME Calendar's local calendars) by stripping the domain prefix and retrying with the plain Olson name
 
 ### `calendarUtils.js`
 - `getCalendarColor(source)` - Get hex color from EDS source
 - `getAccountEmailForSource(source, registry)` - Get authenticated user's email
 - `getCalendarIdForSource(source)` - Extract canonical calendar ID from WebDAV path
-- `getCalendarPrivilegeScore(calendarId, accountEmail, isReadonly)` - Calculate owner/editor/readonly score
+- `getCalendarPrivilegeScore(calendarId, accountEmail, isReadonly)` - Calculate owner/editor/readonly score; `isReadonly` defaults to `true`, so a caller with no read-only map scores every non-owner calendar as read-only.
 - `deduplicateSources(sources, registry, readonlyMap)` - Remove duplicate calendars across accounts
 
 ### `meetingServices.js`
@@ -333,22 +338,19 @@ Loaded only by the GNOME Shell process. These may import `St`, `Clutter`, `Panel
 
 Loaded only by the service subprocess. These may import `ECal`/`EDataServer`/`ICalGLib`; nothing here may ever be imported by the Shell process.
 
-### `asyncResult.js`
-- `unwrapAsyncResult(result)` - Normalize promisified EDS return shapes (see "Promisified EDS Results" below)
-
 ### `eventProperties.js`
 - `icalTimeToTimestamp(icalTime)` - `ICalGLib.Time` → epoch milliseconds
 - `getEventStart(event)` / `getEventEnd(event)` - Instance times, falling back to DTSTART + 1h
 - `getPropertyString(event, methodName)` / `getEventTitle(event)` - Safe component property reads
 - `isAllDayEvent(event)` - `dtStart.is_date()` check
 - `hasCurrentUserPartstat(event, targetPartstat)` - Attendee PARTSTAT lookup for the account's own address
-- `isDeclinedEvent(event)` / `isTentativeEvent(event)` / `isNeedsResponseEvent(event)`
-- `findVideoLink(event)` - Video conference URL from location, then description
+- `isDeclinedEvent(event)` / `isTentativeEvent(event)` / `isNeedsResponseEvent(event)`. `isDeclinedEvent` falls back to a `declined:`/`rejected:` prefix on the title, anchored to the start, for backends that drop PARTSTAT.
+- `findVideoLink(event)` - Video conference URL from location, then description, then a scan of the whole serialized component
 - `wrapICalComponent(comp, instanceStartMs, instanceEndMs, accountEmail, calendarColor, recurrenceIdStartMs)` - Wrap a component with its instance times and metadata
 
 ### `eventQuery.js`
 - `generateInstancesAsync(service, client, startTimet, endTimet, cancellable)` - `generate_instances_sync()` deferred through `GLib.idle_add()`
-- `buildRescheduledMapAsync(service, client, sourceUid, todayDateStr)` - Phase 1 of the two-phase query (see "Two-Phase Query Architecture")
+- `buildRescheduledMapAsync(service, client, sourceUid, todayDateStr, todayStartMs, todayEndMs)` - Phase 1 of the two-phase query (see "Two-Phase Query Architecture")
 - `queryEventsAsync(service, client, sourceUid)` - Full per-source event query
 
 ## GSettings Keys Reference
@@ -377,6 +379,8 @@ Loaded only by the service subprocess. These may import `ECal`/`EDataServer`/`IC
 - `show-past-events`, `show-event-end-time`, `time-format`, `use-calendar-colors`, `event-types` (menu re-render)
 - `real-time-countdown`, `event-title-length` (label update only)
 - `status-bar-icon-type` (icon update only)
+
+Opening the Calendars page in prefs prunes `enabled-calendars` of UIDs that no longer resolve in the registry, which can write the key once and trigger one service re-fetch.
 
 ## Code Conventions
 
@@ -414,55 +418,62 @@ import {functionName} from '../lib/moduleName.js';  // from ui/ or service/
 
 ### Error Handling
 
-- Only use try/catch around EDS async `*_finish()` callbacks that genuinely throw GError
-- Do NOT use try-catch around property getters, signal connections, or pure computations
+- Only use try/catch around awaited EDS calls, which reject with GError
+- Do NOT use try-catch around property getters, signal connections, `destroy()`, `disconnect()` or `GLib.Source.remove()`
 - Use `console.debug()` for non-critical warnings
 - Use `console.error()` for actual errors
 - Silent failures for operations that commonly fail (calendar sync not supported)
+
+### Review Guidelines
+
+Chronome is submitted to extensions.gnome.org, so edits must stay inside the [review guidelines](https://gjs.guide/extensions/review-guidelines/review-guidelines.html) and [best practices](https://gjs.guide/extensions/review-guidelines/best-practices.html). The rules this file does not cover elsewhere:
+
+- No `?.()` or `typeof x === 'function'` on a guaranteed API
+- Lines of 200 columns at most
+- A custom `destroy()` runs in this order: sources, signals, references, then `super.destroy()`
 
 ## Common Pitfalls for AI Agents
 
 ### Async Safety (service.js)
 
-1. **Check cancellable**: Always check `if (!this._cancellable) return;` at the start of async callbacks to prevent post-shutdown updates. The cancellable is set to null in `_shutdown()` and serves as the destroyed flag.
+1. **Check the cancellable**: a continuation that resumes after an `await` re-checks `this._cancellable.is_cancelled()` before touching state. `_shutdown()` cancels it and never nulls it, so it stays readable for the life of the process. Do not add a separate shutdown boolean.
 
-2. **Callback wrapping**: EDS async operations use callbacks, not Promises. The service wraps them:
+2. **Awaited EDS calls**: the service promisifies its EDS calls and awaits them, filtering `CANCELLED` out of the catch:
    ```javascript
-   client.refresh(this._cancellable, (obj, res) => {
-       if (!this._cancellable) return;  // CRITICAL: service may be shutting down
-       try { obj.refresh_finish(res); } catch (e) { ... }
-   });
+   if (this._cancellable.is_cancelled()) return;
+   try {
+       await client.refresh(this._cancellable);
+   } catch (e) {
+       if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return;
+       if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.NOT_SUPPORTED))
+           console.debug(`Chronome service: Calendar sync failed: ${e.message}`);
+   }
    ```
+
+`ChronomeIndicator` uses no lifecycle flag and tears down in `destroy()`. Do not copy the service's cancellable pattern into `ui/` or `extension.js`.
 
 ### Promisified EDS Results (service.js)
 
-`Gio._promisify` does NOT resolve the same shape that the matching `*_sync` call returns. An EDS `gboolean fn(…, out X)` function returns `[ok, X]` from its `*_sync` variant, but the **promisified async variant resolves to just `[X]`** — GJS strips the leading `gboolean` success value. (At least one GJS version was observed keeping `[ok, X]`, so handle both shapes.)
-
-Destructuring the awaited result `*_sync`-style as `[, value]` therefore reads `undefined`. Use the `unwrapAsyncResult()` helper instead:
+`Gio._promisify` shifts off a leading `true`, so a promisified `gboolean fn(…, out X)` resolves to `[X]`, not the `[ok, X]` its `*_sync` variant returns. Read index 0, never `[, value]`:
 
 ```javascript
-// WRONG — reads undefined; the leading boolean was stripped
-[, storedComps] = await client.get_object_list_as_comps(query, cancellable);
-
-// RIGHT
-storedComps = unwrapAsyncResult(
-    await client.get_object_list_as_comps(query, cancellable));
+[storedComps] = await client.get_object_list_as_comps(query, cancellable);
 ```
 
-This silently broke two call sites: `get_object_list_as_comps` (the `rescheduledFromToday` map was always empty, so rescheduled instances were never skipped — they leaked into their original day) and `get_view` (client views were never started, so signal-based cache invalidation never ran). Calls whose `*_finish` returns the value directly (`ECal.Client.connect`, `SourceRegistry.new`, `read_bytes_async`) are unaffected; so is `refresh` (no out-arg, return value unused).
+Calls whose `*_finish` returns the value directly (`ECal.Client.connect`, `SourceRegistry.new`, `read_bytes_async`) are unaffected; so is `refresh` (no out-arg, return value unused).
 
 ### GLib Timer Management
 
 - Use `GLib.timeout_add_seconds()` not `setTimeout()`
-- **ui/indicator.js**: Display timer removed in `destroy()`; **extension.js**: restart timeout removed in `disable()`
+- **ui/indicator.js**: Display timer removed by `_stopTimer()`, called from `startTimer()` and `destroy()`; **extension.js**: restart timeout removed in `disable()`
 - **service.js**: ALL GLib sources must be removed in `_shutdown()`. Named timers (fetch, debounce) tracked individually. Fire-and-forget sources use `this._sourceIds` Set:
   ```javascript
   const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
-      this._sourceIds?.delete(id);
+      this._sourceIds.delete(id);
       // ... callback logic ...
       return GLib.SOURCE_REMOVE;
   });
-  this._sourceIds?.add(id);
+  this._sourceIds.add(id);
   ```
 
 ### Blocking Operations (service.js)
@@ -476,24 +487,11 @@ This silently broke two call sites: `get_object_list_as_comps` (the `rescheduled
   });
   ```
 
-### Component Type Confusion
-
-Different EDS APIs return different component types:
-- `generate_instances_sync` callback: `ICalGLib.Component`
-- `get_object_list_as_comps`: `ECal.Component`
-
-Methods differ:
-
-| Operation | ICalGLib.Component | ECal.Component |
-|-----------|-------------------|----------------|
-| Get iCal string | `as_ical_string()` | `get_as_string()` |
-| Get recurrence ID | `get_recurrenceid()` | `get_recurid_as_string()` |
-
 ### Settings Signal Cleanup
 
-Always disconnect settings signals during cleanup:
+Always disconnect signals during cleanup, collecting their ids in an array:
 - **ui/indicator.js**: In `destroy()` of `ChronomeIndicator`
-- **service.js**: In `_shutdown()`
+- **service.js**: In `_shutdown()`, for both `_settingsSignals` and `_registrySignals`
 
 ```javascript
 for (const id of this._settingsSignals) {
@@ -503,20 +501,18 @@ for (const id of this._settingsSignals) {
 
 ### Cancellable for Async Operations (service.js)
 
-Use `Gio.Cancellable` for EDS async operations and cancel in `_shutdown()`:
+One `Gio.Cancellable` is passed to every EDS call and cancelled in `_shutdown()`, where it also serves as the reentrancy guard:
 ```javascript
 this._cancellable = new Gio.Cancellable();
 // In _shutdown:
 this._cancellable.cancel();
-this._cancellable = null;
 ```
 
 ## Event Handling
 
 Events are fetched in `service.js` using async wrappers around `ECal.Client.generate_instances_sync()` which properly expands recurring events. Key implementation details:
 
-- **Non-blocking async**: All EDS operations use async patterns (callbacks wrapped in Promises, idle callbacks) to avoid blocking the service main loop
-- **Recurring event expansion**: Uses `generate_instances_sync()` wrapped in `GLib.idle_add()` to get actual occurrence times without blocking
+- **Non-blocking async**: All EDS operations are promisified or deferred through idle callbacks to avoid blocking the service main loop
 - **Deduplication**: Events are deduplicated by UID + start time, preferring exceptions over master occurrences
 - **ICalGLib.Component wrapping**: The callback returns `ICalGLib.Component` objects (not `ECal.Component`), which are wrapped with instance times and proxy methods
 - **JSON serialization**: Service converts event wrappers to plain JSON objects and emits via D-Bus `EventsChanged` signal
@@ -558,31 +554,27 @@ To correctly handle rescheduled instances efficiently:
 1. **Phase 1**: Query recurring events and detached instances with `get_object_list_as_comps('(or (has-recurrences? #t) (contains? "recurrence-id" ""))')` (async)
    - Much smaller dataset than querying all events with `'#t'`
    - Results are cached per calendar source (`_rescheduledCache`)
-2. **Build a rescheduled instances map**: Find detached instances where:
-   - `RECURRENCE-ID` date (from iCal string regex) matches today
-   - `DTSTART` date (from iCal string regex) is DIFFERENT from RECURRENCE-ID
-   - Store as `Map<"UID:RECURRENCE-ID-DATE", "DTSTART-DATE">`
+2. **Build a rescheduled instances map**: parse `RECURRENCE-ID` and `DTSTART` to instants with `parseIcalDateTime()` and compare them against today's local bounds. A detached instance whose `RECURRENCE-ID` falls inside today and whose `DTSTART` does not is recorded in `rescheduledFromToday`, a `Set` of UIDs, so every same-day occurrence of that UID is skipped.
 3. **Phase 2**: Use `generate_instances_sync()` wrapped in `GLib.idle_add()` to expand recurring events without blocking
 4. **Filter**: Skip detached instances that appear in the rescheduled map
 
 ### Caching Strategy
 
-- **Per-source cache**: `_rescheduledCache` is a `Map<sourceUid, Map<key, value>>`
+- **Per-source cache**: `_rescheduledCache` is a `Map<sourceUid, {rescheduledFromToday, movedToToday}>`
 - **Date invalidation**: Entire cache is cleared when the date changes
 - **Signal-based invalidation**: `ECalClientView` signals (`objects-added/modified/removed`) invalidate only the affected source's cache
-- **Source changes**: Registry signals (`source-added/changed/removed`) clear the entire cache
+- **Source changes**: Registry signals (`source-added/changed/removed`) invalidate only the affected source; the whole cache is cleared only when the signal carries no source
 
 ### iCal String Parsing
 
-Since `generate_instances_sync` modifies the component, extract dates from raw iCal strings:
+Since `generate_instances_sync` modifies the component, read the dates from the raw iCal string instead of the component:
 
 ```javascript
-// Extract RECURRENCE-ID date (YYYYMMDD)
-const recurIdMatch = icalStr.match(/RECURRENCE-ID[^:]*:(\d{8})/);
-
-// Extract DTSTART date (YYYYMMDD)
-const dtstartMatch = icalStr.match(/DTSTART[^:]*:(\d{8})/);
+const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
+const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
 ```
+
+Compare the parsed instants, never the wire `YYYYMMDD` text: a property stored in UTC or under a foreign TZID has a different calendar date from the viewer's.
 
 ### Component Types
 
@@ -606,10 +598,13 @@ The `generate_instances_sync` callback signature is:
 
 ### When to Show vs Skip Detached Instances
 
+Both instants are tested against today's local bounds.
+
 | Scenario | RECURRENCE-ID | DTSTART | Action |
 |----------|---------------|---------|--------|
-| Modified (same date) | Dec 10 | Dec 10 | SHOW (location/attendee changes) |
-| Rescheduled (different date) | Dec 10 | Dec 17 | SKIP (will appear on Dec 17) |
+| Modified in place | today | today | SHOW (location/attendee changes) |
+| Rescheduled off today | today | another day | SKIP (appears on its new day) |
+| Rescheduled onto today | another day | today | SHOW (added from `movedToToday`) |
 
 ### Reference: GNOME Calendar Approach
 

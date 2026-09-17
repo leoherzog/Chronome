@@ -10,7 +10,6 @@ import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import {gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Pure utility modules (display-side only)
 import {formatDuration, formatTimeRange, truncateText} from '../lib/formatting.js';
 import {getCurrentMeetings, sortEventsByStartTime} from '../lib/eventUtils.js';
 
@@ -18,6 +17,7 @@ const CONSTANTS = {
     OPACITY_DIMMED: 178,
     OPACITY_TENTATIVE: 204,
     MENU_ICON_SIZE: 16,
+    DBUS_CALL_TIMEOUT_MS: 5000,
 };
 
 export const ChronomeIndicator = GObject.registerClass({
@@ -46,20 +46,15 @@ export const ChronomeIndicator = GObject.registerClass({
         box.add_child(this._label);
         this.add_child(box);
 
-        // Timer to update display countdown (every second)
         this._displayTimeout = null;
-
-        // Store parsed event data from service
         this._nextMeeting = null;
         this._events = [];
-        this._dataLoaded = false;
 
         this._updateIcon();
 
         this._proxySignalId = this._proxy.connectSignal('EventsChanged',
             (_proxy, _sender, [json]) => this._onEventsChanged(json));
 
-        // Connect settings signals for UI-only settings
         this._settingsSignals = [];
 
         const refreshSettings = ['show-past-events', 'show-event-end-time',
@@ -70,15 +65,14 @@ export const ChronomeIndicator = GObject.registerClass({
             );
         }
 
-        const labelSettings = ['real-time-countdown', 'event-title-length'];
-        for (const key of labelSettings) {
-            this._settingsSignals.push(
-                this._settings.connect(`changed::${key}`, () => {
-                    if (key === 'real-time-countdown') this.startTimer();
-                    this._updatePanelLabel(this._nextMeeting);
-                })
-            );
-        }
+        this._settingsSignals.push(
+            this._settings.connect('changed::real-time-countdown', () => {
+                this.startTimer();
+                this._updatePanelLabel(this._nextMeeting);
+            }),
+            this._settings.connect('changed::event-title-length',
+                () => this._updatePanelLabel(this._nextMeeting))
+        );
 
         this._settingsSignals.push(
             this._settings.connect('changed::status-bar-icon-type', () => this._updateIcon())
@@ -86,17 +80,18 @@ export const ChronomeIndicator = GObject.registerClass({
     }
 
     fetchInitialData() {
-        this._proxy.call('GetEvents', null, Gio.DBusCallFlags.NONE, 5000, this._cancellable,
-            (proxy, res) => {
+        this._proxy.call('GetEvents', null, Gio.DBusCallFlags.NONE, CONSTANTS.DBUS_CALL_TIMEOUT_MS,
+            this._cancellable, (proxy, res) => {
+                let result;
                 try {
-                    const result = proxy.call_finish(res);
-                    if (result) {
-                        const [json] = result.deep_unpack();
-                        this._onEventsChanged(json);
-                    }
+                    result = proxy.call_finish(res);
                 } catch (e) {
-                    console.debug(`Chronome: GetEvents call failed (service may be starting): ${e.message}`);
+                    if (!e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        console.debug(`Chronome: GetEvents call failed (service may be starting): ${e.message}`);
+                    return;
                 }
+                const [json] = result.deep_unpack();
+                this._onEventsChanged(json);
             }
         );
     }
@@ -111,14 +106,21 @@ export const ChronomeIndicator = GObject.registerClass({
         }
         this._nextMeeting = data.nextMeeting;
         this._events = data.events || [];
-        this._dataLoaded = true;
         this._updateFromCache();
     }
 
+    // An empty PopupMenu refuses to open, so the closed menu is kept built; removeAll() while open would destroy the focused row.
     _updateFromCache() {
-        this._updateMenu(this._events);
+        if (!this.menu.isOpen)
+            this._updateMenu();
         this._updatePanelLabel(this._nextMeeting);
         this._updateIcon();
+    }
+
+    _onOpenStateChanged(menu, open) {
+        if (open)
+            this._updateMenu();
+        super._onOpenStateChanged(menu, open);
     }
 
     _updateIcon() {
@@ -145,10 +147,7 @@ export const ChronomeIndicator = GObject.registerClass({
     }
 
     startTimer() {
-        if (this._displayTimeout) {
-            GLib.Source.remove(this._displayTimeout);
-            this._displayTimeout = null;
-        }
+        this._stopTimer();
         if (this._settings.get_boolean('real-time-countdown')) {
             this._displayTimeout = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
                 if (this._nextMeeting) {
@@ -160,15 +159,13 @@ export const ChronomeIndicator = GObject.registerClass({
                     } else {
                         this._updatePanelLabel(this._nextMeeting);
                     }
-                } else if (this._dataLoaded) {
-                    this._updatePanelLabel(null);
                 }
                 return GLib.SOURCE_CONTINUE;
             });
         }
     }
 
-    stopTimer() {
+    _stopTimer() {
         if (this._displayTimeout) {
             GLib.Source.remove(this._displayTimeout);
             this._displayTimeout = null;
@@ -176,7 +173,7 @@ export const ChronomeIndicator = GObject.registerClass({
     }
 
     _refreshEvents() {
-        this._proxy.call('Refresh', null, Gio.DBusCallFlags.NONE, 5000, null, null);
+        this._proxy.call('Refresh', null, Gio.DBusCallFlags.NONE, CONSTANTS.DBUS_CALL_TIMEOUT_MS, null, null);
     }
 
     _updatePanelLabel(nextMeeting) {
@@ -206,14 +203,14 @@ export const ChronomeIndicator = GObject.registerClass({
 
         if (startTime <= now && endTime > now) {
             const remainingMs = endTime - now;
-            const remainingText = this._formatDuration(remainingMs) + ' ' + _('left');
+            const remainingText = formatDuration(remainingMs, _) + ' ' + _('left');
             const concurrentSuffix = this._getConcurrentCurrentMeetingSuffix(nextMeeting, now);
             this._label.set_text(`${remainingText} ${_('in')} ${shortenedTitle}${concurrentSuffix}`);
             return;
         }
 
         const diffMs = startTime - now;
-        this._label.set_text(`${this._formatDuration(diffMs)} ${_('until')} ${shortenedTitle}`);
+        this._label.set_text(`${formatDuration(diffMs, _)} ${_('until')} ${shortenedTitle}`);
     }
 
     // Show "+N" for additional meetings happening at the same time.
@@ -261,10 +258,10 @@ export const ChronomeIndicator = GObject.registerClass({
         this.menu.addMenuItem(noEventsItem);
     }
 
-    _updateMenu(events) {
+    _updateMenu() {
         this.menu.removeAll();
 
-        if (!events || events.length === 0) {
+        if (this._events.length === 0) {
             this._addNoEventsItem();
             return;
         }
@@ -273,9 +270,10 @@ export const ChronomeIndicator = GObject.registerClass({
         const showPastEvents = this._settings.get_boolean('show-past-events');
         const showEndTime = this._settings.get_boolean('show-event-end-time');
         const useColors = this._settings.get_boolean('use-calendar-colors');
+        const use24Hour = this._settings.get_string('time-format') === '24h';
         const now = Date.now();
 
-        const sorted = sortEventsByStartTime([...events], e => e.startMs);
+        const sorted = sortEventsByStartTime([...this._events], e => e.startMs);
 
         const visibleEvents = [];
         for (const event of sorted) {
@@ -300,7 +298,7 @@ export const ChronomeIndicator = GObject.registerClass({
             visibleEvents.push({
                 ...event,
                 isPast,
-                timeRange: isAllDay ? _('All Day') : this._formatTimeRange(event.startMs, event.endMs, showEndTime),
+                timeRange: isAllDay ? _('All Day') : formatTimeRange(event.startMs, event.endMs, showEndTime, use24Hour),
             });
         }
 
@@ -313,22 +311,16 @@ export const ChronomeIndicator = GObject.registerClass({
             const {startMs, endMs, isPast, isDeclined, isTentative,
                    isNeedsResponse, timeRange, title, videoLink, calendarColor} = data;
 
-            let statusIcon = null;
-            if (isDeclined)
-                statusIcon = 'radio-mixed-symbolic';
-            else if (isTentative)
-                statusIcon = 'radio-checked-symbolic';
-            else if (isNeedsResponse)
-                statusIcon = 'radio-symbolic';
+            const [statusIcon, statusText] = isDeclined ? ['radio-mixed-symbolic', _('Declined')]
+                : isTentative ? ['radio-checked-symbolic', _('Tentative')]
+                : isNeedsResponse ? ['radio-symbolic', _('Needs response')]
+                : [null, null];
 
             const menuItem = statusIcon
                 ? new PopupMenu.PopupImageMenuItem('', statusIcon)
                 : new PopupMenu.PopupMenuItem('');
 
-            const labelBox = new St.BoxLayout({
-                vertical: false,
-                x_expand: true,
-            });
+            const labelBox = new St.BoxLayout({x_expand: true});
 
             if (useColors && calendarColor) {
                 const colorBar = new St.Widget({
@@ -374,10 +366,15 @@ export const ChronomeIndicator = GObject.registerClass({
             menuItem.label.hide();
             menuItem.add_child(labelBox);
 
+            // The hidden built-in label leaves the row with no accessible name of its own.
+            menuItem.accessible_name = [timeRange, title, statusText, videoLink ? _('Video call') : null]
+                .filter(s => s)
+                .join(', ');
+
             if (videoLink) {
                 menuItem.connect('activate', () => {
                     try {
-                        Gio.AppInfo.launch_default_for_uri(videoLink, null);
+                        Gio.AppInfo.launch_default_for_uri(videoLink, global.create_app_launch_context(0, -1));
                     } catch (e) {
                         console.error(`Chronome: Failed to launch URL: ${e}`);
                     }
@@ -411,25 +408,14 @@ export const ChronomeIndicator = GObject.registerClass({
         this.menu.addMenuItem(settingsItem);
     }
 
-    _formatTimeRange(startTs, endTs, showEndTime = true) {
-        const use24Hour = this._settings.get_string('time-format') === '24h';
-        return formatTimeRange(startTs, endTs, showEndTime, use24Hour);
-    }
-
-    _formatDuration(ms) {
-        return formatDuration(ms, _);
-    }
-
     destroy() {
-        this.stopTimer();
+        this._stopTimer();
 
         this._cancellable.cancel();
         this._cancellable = null;
 
-        if (this._proxySignalId) {
-            this._proxy.disconnectSignal(this._proxySignalId);
-            this._proxySignalId = null;
-        }
+        this._proxy.disconnectSignal(this._proxySignalId);
+        this._proxySignalId = null;
 
         for (const id of this._settingsSignals)
             this._settings.disconnect(id);

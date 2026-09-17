@@ -5,9 +5,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {ChronomeIndicator} from './ui/indicator.js';
-
-const DBUS_NAME = 'tech.herzog.Chronome1';
-const DBUS_PATH = '/tech/herzog/Chronome';
+import {DBUS_NAME, DBUS_PATH, DBUS_IFACE_XML} from './lib/dbusInterface.js';
 
 const SERVICE_RESTART_DELAY_SEC = 2;
 const SERVICE_RESTART_MAX_DELAY_SEC = 60;
@@ -20,7 +18,6 @@ export default class ChronomeExtension extends Extension {
         this._chronomeIndicator = null;
         this._settings = null;
         this._subprocess = null;
-        this._proxy = null;
         this._proxyCancellable = null;
         this._restartTimeoutId = null;
         this._restartAttempts = 0;
@@ -32,27 +29,11 @@ export default class ChronomeExtension extends Extension {
 
         this._spawnService();
 
-        const nodeInfo = Gio.DBusNodeInfo.new_for_xml(`
-            <node>
-              <interface name="${DBUS_NAME}">
-                <method name="GetEvents">
-                  <arg type="s" direction="out" name="json"/>
-                </method>
-                <method name="Refresh"/>
-                <method name="Ping">
-                  <arg type="b" direction="out" name="alive"/>
-                </method>
-                <signal name="EventsChanged">
-                  <arg type="s" name="json"/>
-                </signal>
-              </interface>
-            </node>`);
-
         this._proxyCancellable = new Gio.Cancellable();
         Gio.DBusProxy.new_for_bus(
             Gio.BusType.SESSION,
-            Gio.DBusProxyFlags.NONE,
-            nodeInfo.interfaces[0],
+            Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES | Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+            Gio.DBusNodeInfo.new_for_xml(DBUS_IFACE_XML).interfaces[0],
             DBUS_NAME,
             DBUS_PATH,
             DBUS_NAME,
@@ -67,10 +48,7 @@ export default class ChronomeExtension extends Extension {
                     return;
                 }
 
-                if (!this._settings) return;
-
-                this._proxy = proxy;
-                this._chronomeIndicator = new ChronomeIndicator(this, this._settings, this._proxy);
+                this._chronomeIndicator = new ChronomeIndicator(this, this._settings, proxy);
                 Main.panel.addToStatusArea('chronome-indicator', this._chronomeIndicator);
                 this._chronomeIndicator.startTimer();
                 this._chronomeIndicator.fetchInitialData();
@@ -99,16 +77,14 @@ export default class ChronomeExtension extends Extension {
             this._subprocess = null;
         }
 
-        this._proxy = null;
         this._settings = null;
     }
 
     _spawnService() {
         const servicePath = this.path + '/service.js';
-        // STDIN_PIPE: child reads from a pipe owned by this process. When the
-        // parent dies (or disable() closes the subprocess), the pipe's write
-        // end closes and the child reads EOF — that's how _watchParent in
-        // service.js detects parent death and shuts down cleanly.
+        // STDIN_PIPE: the child reads a pipe owned by this process. The write end
+        // closes when the Shell process dies, and _watchParent in service.js treats
+        // that EOF as the signal to shut down.
         let subprocess;
         try {
             subprocess = Gio.Subprocess.new(
@@ -141,7 +117,7 @@ export default class ChronomeExtension extends Extension {
     }
 
     _scheduleRestart() {
-        if (!this._settings || this._restartTimeoutId)
+        if (this._restartTimeoutId)
             return;
 
         const delaySec = Math.min(
@@ -156,11 +132,7 @@ export default class ChronomeExtension extends Extension {
             delaySec,
             () => {
                 this._restartTimeoutId = null;
-                if (this._settings) {
-                    this._spawnService();
-                    if (this._chronomeIndicator)
-                        this._chronomeIndicator.fetchInitialData();
-                }
+                this._spawnService();
                 return GLib.SOURCE_REMOVE;
             }
         );

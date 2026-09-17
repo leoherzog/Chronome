@@ -1,25 +1,18 @@
 // Today's-events query pipeline for the Chronome D-Bus service.
 // Loaded only by the spawned service process (see service.js).
-//
-// These take the ChronomeService instance as their first argument because they
-// need *live* reads of state that changes underneath an in-flight query --
-// `_shuttingDown`, `_cancellable` and `_sourceIds` are all reassigned by
-// `_shutdown()` while these promises are pending, so a snapshot taken at call
-// time would be wrong.
+// Each takes the ChronomeService instance and reads its live cancellable, source set and rescheduled cache.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {parseIcalDateTime, extractIcalDateString} from '../lib/icalParser.js';
+import {parseIcalDateTime} from '../lib/icalParser.js';
 import {ONE_HOUR_MS} from '../lib/constants.js';
-import {unwrapAsyncResult} from './asyncResult.js';
 import {icalTimeToTimestamp, wrapICalComponent} from './eventProperties.js';
 
 export function generateInstancesAsync(service, client, startTimet, endTimet, cancellable) {
     return new Promise((resolve, reject) => {
         const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            service._sourceIds?.delete(id);
-            if (service._shuttingDown) { resolve([]); return GLib.SOURCE_REMOVE; }
+            service._sourceIds.delete(id);
             const instances = [];
             try {
                 client.generate_instances_sync(
@@ -35,7 +28,7 @@ export function generateInstancesAsync(service, client, startTimet, endTimet, ca
                 );
                 resolve(instances);
             } catch (e) {
-                if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
+                if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) {
                     resolve([]);
                 } else {
                     reject(e);
@@ -43,11 +36,11 @@ export function generateInstancesAsync(service, client, startTimet, endTimet, ca
             }
             return GLib.SOURCE_REMOVE;
         });
-        service._sourceIds?.add(id);
+        service._sourceIds.add(id);
     });
 }
 
-export async function buildRescheduledMapAsync(service, client, sourceUid, todayDateStr) {
+export async function buildRescheduledMapAsync(service, client, sourceUid, todayDateStr, todayStartMs, todayEndMs) {
     if (service._cacheDate !== todayDateStr) {
         service._rescheduledCache.clear();
         service._cacheDate = todayDateStr;
@@ -57,57 +50,49 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
         return service._rescheduledCache.get(sourceUid);
 
     const {accountEmail, calendarColor} = service._getSourceMetadata(sourceUid);
-    const result = { rescheduledFromToday: new Map(), movedToToday: [] };
-
-    if (service._shuttingDown) return result;
+    const result = { rescheduledFromToday: new Set(), movedToToday: [] };
 
     const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
     let storedComps;
     try {
-        storedComps = unwrapAsyncResult(
-            await client.get_object_list_as_comps(query, service._cancellable));
+        [storedComps] = await client.get_object_list_as_comps(query, service._cancellable);
     } catch (e) {
-        if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return result;
+        if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return result;
         service._logSourceFailure(sourceUid,
             `Chronome service: Error in get_object_list_as_comps: ${e}`);
         service._rescheduledCache.set(sourceUid, result);
         return result;
     }
 
-    if (service._shuttingDown) return result;
+    if (service._cancellable.is_cancelled()) return result;
 
-    if (storedComps) {
-        for (const comp of storedComps) {
-            const icalStr = comp.get_as_string();
-            const recurIdDateStr = extractIcalDateString(icalStr, 'RECURRENCE-ID');
-            if (!recurIdDateStr) continue;
+    // Compare instants, not the raw wire dates: a property stored in UTC or in
+    // a foreign TZID has a different calendar date from the viewer's.
+    const isToday = ms => ms >= todayStartMs && ms <= todayEndMs;
 
-            const storedDtstartDateStr = extractIcalDateString(icalStr, 'DTSTART');
-            const uid = comp.get_uid();
-            if (!uid || !storedDtstartDateStr) continue;
+    for (const comp of storedComps) {
+        const icalStr = comp.get_as_string();
+        const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
+        const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
+        const uid = comp.get_uid();
+        if (!uid || !parsedRecurId || !parsedStart) continue;
 
-            if (recurIdDateStr === todayDateStr && storedDtstartDateStr !== todayDateStr) {
-                const key = `${uid}:${recurIdDateStr}`;
-                result.rescheduledFromToday.set(key, storedDtstartDateStr);
-            }
+        const recurIdIsToday = isToday(parsedRecurId.timestampMs);
+        const dtstartIsToday = isToday(parsedStart.timestampMs);
 
-            if (recurIdDateStr !== todayDateStr && storedDtstartDateStr === todayDateStr) {
-                const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
+        if (recurIdIsToday && !dtstartIsToday)
+            result.rescheduledFromToday.add(uid);
+
+        if (!recurIdIsToday && dtstartIsToday) {
+            const icalComp = comp.get_icalcomponent();
+            if (icalComp) {
                 const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
-                const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
-
-                if (parsedStart?.timestampMs) {
-                    const icalComp = comp.get_icalcomponent();
-                    if (icalComp) {
-                        const instanceStartMs = parsedStart.timestampMs;
-                        const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS);
-                        const recurrenceIdStartMs = parsedRecurId?.timestampMs || null;
-                        result.movedToToday.push(
-                            wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
-                                accountEmail, calendarColor, recurrenceIdStartMs)
-                        );
-                    }
-                }
+                const instanceStartMs = parsedStart.timestampMs;
+                const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS);
+                result.movedToToday.push(
+                    wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
+                        accountEmail, calendarColor, parsedRecurId.timestampMs)
+                );
             }
         }
     }
@@ -117,17 +102,19 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
 }
 
 export async function queryEventsAsync(service, client, sourceUid) {
-    if (!client || service._shuttingDown) return [];
+    if (service._cancellable.is_cancelled()) return [];
 
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-    const startTimet = Math.floor(todayStart.getTime() / 1000);
-    const endTimet = Math.floor(todayEnd.getTime() / 1000);
+    const todayStartMs = todayStart.getTime();
+    const todayEndMs = todayEnd.getTime();
+    const startTimet = Math.floor(todayStartMs / 1000);
+    const endTimet = Math.floor(todayEndMs / 1000);
     const todayDateStr = `${todayStart.getFullYear()}${String(todayStart.getMonth() + 1).padStart(2, '0')}${String(todayStart.getDate()).padStart(2, '0')}`;
 
-    const rescheduleData = await buildRescheduledMapAsync(service, client, sourceUid, todayDateStr);
-    const {rescheduledFromToday, movedToToday} = rescheduleData;
+    const {rescheduledFromToday, movedToToday} = await buildRescheduledMapAsync(
+        service, client, sourceUid, todayDateStr, todayStartMs, todayEndMs);
 
     let rawInstances;
     try {
@@ -167,11 +154,7 @@ export async function queryEventsAsync(service, client, sourceUid) {
             }
         }
 
-        if (recurrenceId) {
-            const uid = inst.comp.get_uid();
-            const key = `${uid}:${todayDateStr}`;
-            if (rescheduledFromToday.has(key)) continue;
-        }
+        if (recurrenceId && rescheduledFromToday.has(inst.comp.get_uid())) continue;
 
         const {accountEmail, calendarColor} = service._getSourceMetadata(sourceUid);
         instances.push(wrapICalComponent(inst.comp, instanceStartMs, instanceEndMs,
@@ -180,8 +163,6 @@ export async function queryEventsAsync(service, client, sourceUid) {
 
     instances.push(...movedToToday);
 
-    const todayStartMs = todayStart.getTime();
-    const todayEndMs = todayEnd.getTime();
     return instances.filter(event => {
         const startMs = event._instanceStart;
         const endMs = event._instanceEnd;

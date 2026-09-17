@@ -10,16 +10,11 @@ cd "$SCRIPT_DIR"
 echo "Running Chronome tests..."
 echo ""
 
-TZ=UTC gjs -m tests/runAll.js
-
-exit_code=$?
-
-if [ $exit_code -eq 0 ]; then
+if TZ=UTC gjs -m tests/runAll.js; then
     echo ""
     echo "All tests passed!"
 else
     echo ""
     echo "Some tests failed."
+    exit 1
 fi
-
-exit $exit_code

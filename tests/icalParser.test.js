@@ -1,6 +1,6 @@
 // Tests for lib/icalParser.js
 import { describe, it, expect } from './runner.js';
-import { extractIcalProperty, parseIcalDateTime, extractIcalDateString, resolveTimezone } from '../lib/icalParser.js';
+import { extractIcalProperty, parseIcalDateTime, resolveTimezone } from '../lib/icalParser.js';
 
 describe('extractIcalProperty', function() {
     it('should extract DTSTART with UTC time', function() {
@@ -171,6 +171,22 @@ END:VEVENT`;
         expect(buggyResult.timestampMs).toBe(plainResult.timestampMs);
     });
 
+    it('should resolve a foreign TZID whose wire date differs from the local date', function() {
+        // 09:00 in Tokyo (UTC+9 year-round) is the previous day in the Americas,
+        // which is what makes a wire-date comparison misclassify the instance.
+        const ical = 'DTSTART;TZID=Asia/Tokyo:20250120T090000';
+        const result = parseIcalDateTime(ical, 'DTSTART');
+        expect(result).not.toBeNull();
+        expect(result.timestampMs).toBe(Date.UTC(2025, 0, 20, 0, 0, 0));
+    });
+
+    it('should parse a date-only value to local midnight', function() {
+        const ical = 'DTSTART;VALUE=DATE:20250120';
+        const result = parseIcalDateTime(ical, 'DTSTART');
+        expect(result).not.toBeNull();
+        expect(result.timestampMs).toBe(new Date(2025, 0, 20).getTime());
+    });
+
     it('should parse Feb 29 on a leap year (2024) correctly', function() {
         const ical = 'DTSTART:20240229T120000Z';
         const result = parseIcalDateTime(ical, 'DTSTART');
@@ -184,26 +200,5 @@ END:VEVENT`;
         const result = parseIcalDateTime(ical, 'DTSTART');
         expect(result).not.toBeNull();
         expect(result.isDateOnly).toBeTruthy();
-    });
-});
-
-describe('extractIcalDateString', function() {
-    it('should extract date portion from datetime', function() {
-        const ical = 'DTSTART:20250120T093000Z';
-        expect(extractIcalDateString(ical, 'DTSTART')).toBe('20250120');
-    });
-
-    it('should extract date from date-only property', function() {
-        const ical = 'DTSTART;VALUE=DATE:20250120';
-        expect(extractIcalDateString(ical, 'DTSTART')).toBe('20250120');
-    });
-
-    it('should extract date from RECURRENCE-ID', function() {
-        const ical = 'RECURRENCE-ID:20250115T140000Z';
-        expect(extractIcalDateString(ical, 'RECURRENCE-ID')).toBe('20250115');
-    });
-
-    it('should return null for missing property', function() {
-        expect(extractIcalDateString('DTSTART:20250120T093000Z', 'RECURRENCE-ID')).toBeNull();
     });
 });

@@ -202,6 +202,10 @@ describe('truncateText', function() {
         expect(truncateText(undefined, 10)).toBe('');
     });
 
+    it('should not split surrogate pairs', function() {
+        expect(truncateText('\u{1F389}'.repeat(20), 10)).toBe('\u{1F389}'.repeat(9) + '\u2026');
+    });
+
     it('should use unicode ellipsis', function() {
         const result = truncateText('Hello World', 8);
         expect(result).toContain('\u2026');

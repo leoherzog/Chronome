@@ -26,6 +26,24 @@ export default class ChronomePreferences extends ExtensionPreferences {
         }
     }
 
+    _addComboRow(group, settings, {key, title, subtitle, values, labels}) {
+        const row = new Adw.ComboRow({title, subtitle, model: Gtk.StringList.new(labels)});
+        // Seed before connecting, so seeding does not write the setting back.
+        row.set_selected(values.indexOf(settings.get_string(key)));
+        row.connect('notify::selected', () => settings.set_string(key, values[row.selected]));
+        group.add(row);
+    }
+
+    _addSpinRow(group, settings, {key, title, subtitle, lower, upper, step, page}) {
+        const row = new Adw.SpinRow({
+            title,
+            subtitle,
+            adjustment: new Gtk.Adjustment({lower, upper, step_increment: step, page_increment: page}),
+        });
+        settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+        group.add(row);
+    }
+
     _buildGeneralPage(settings) {
         const page = new Adw.PreferencesPage({
             title: _('General'),
@@ -41,18 +59,12 @@ export default class ChronomePreferences extends ExtensionPreferences {
             {key: 'show-current-meeting', title: _('Show Current Meeting'), subtitle: _('Display ongoing meetings in the panel')},
         ]);
 
-        const refreshRow = new Adw.SpinRow({
+        this._addSpinRow(settingsGroup, settings, {
+            key: 'refresh-interval',
             title: _('Refresh Interval'),
             subtitle: _('How often to fetch calendar data (seconds)'),
-            adjustment: new Gtk.Adjustment({
-                lower: 30,
-                upper: 300,
-                step_increment: 30,
-                page_increment: 60,
-            }),
+            lower: 30, upper: 300, step: 30, page: 60,
         });
-        settings.bind('refresh-interval', refreshRow, 'value', Gio.SettingsBindFlags.DEFAULT);
-        settingsGroup.add(refreshRow);
 
         this._addSwitchRows(settingsGroup, settings, [
             {key: 'show-past-events', title: _('Show Past Events'), subtitle: _('Include completed events in the menu')},
@@ -90,62 +102,28 @@ export default class ChronomePreferences extends ExtensionPreferences {
             title: _('Display'),
         });
 
-        const TIME_FORMATS = ['12h', '24h'];
-
-        const timeFormatModel = new Gtk.StringList();
-        timeFormatModel.append(_('12-hour (1:30 PM)'));
-        timeFormatModel.append(_('24-hour (13:30)'));
-
-        const timeFormatRow = new Adw.ComboRow({
+        this._addComboRow(displayGroup, settings, {
+            key: 'time-format',
             title: _('Time Format'),
             subtitle: _('Clock format for event times'),
-            model: timeFormatModel,
+            values: ['12h', '24h'],
+            labels: [_('12-hour (1:30 PM)'), _('24-hour (13:30)')],
         });
 
-        const timeValue = settings.get_string('time-format');
-        timeFormatRow.set_selected(Math.max(0, TIME_FORMATS.indexOf(timeValue)));
-
-        timeFormatRow.connect('notify::selected', () => {
-            // AdwComboRow.selected is GTK_INVALID_LIST_POSITION when nothing is selected
-            settings.set_string('time-format',
-                TIME_FORMATS[Math.min(timeFormatRow.selected, TIME_FORMATS.length - 1)]);
-        });
-        displayGroup.add(timeFormatRow);
-
-        const ICON_TYPES = ['calendar', 'meeting-type', 'none'];
-
-        const iconTypeModel = new Gtk.StringList();
-        iconTypeModel.append(_('Calendar Icon'));
-        iconTypeModel.append(_('Meeting Type Icon'));
-        iconTypeModel.append(_('No Icon'));
-
-        const iconTypeRow = new Adw.ComboRow({
+        this._addComboRow(displayGroup, settings, {
+            key: 'status-bar-icon-type',
             title: _('Status Bar Icon'),
             subtitle: _('Icon shown next to the event summary'),
-            model: iconTypeModel,
+            values: ['calendar', 'meeting-type', 'none'],
+            labels: [_('Calendar Icon'), _('Meeting Type Icon'), _('No Icon')],
         });
 
-        const iconValue = settings.get_string('status-bar-icon-type');
-        iconTypeRow.set_selected(Math.max(0, ICON_TYPES.indexOf(iconValue)));
-
-        iconTypeRow.connect('notify::selected', () => {
-            settings.set_string('status-bar-icon-type',
-                ICON_TYPES[Math.min(iconTypeRow.selected, ICON_TYPES.length - 1)]);
-        });
-        displayGroup.add(iconTypeRow);
-
-        const titleLengthRow = new Adw.SpinRow({
+        this._addSpinRow(displayGroup, settings, {
+            key: 'event-title-length',
             title: _('Maximum Title Length'),
             subtitle: _('Truncate long event titles'),
-            adjustment: new Gtk.Adjustment({
-                lower: 10,
-                upper: 100,
-                step_increment: 5,
-                page_increment: 10,
-            }),
+            lower: 10, upper: 100, step: 5, page: 10,
         });
-        settings.bind('event-title-length', titleLengthRow, 'value', Gio.SettingsBindFlags.DEFAULT);
-        displayGroup.add(titleLengthRow);
 
         this._addSwitchRows(displayGroup, settings, [
             {key: 'use-calendar-colors', title: _('Use Calendar Colors'), subtitle: _('Show colored border based on calendar')},
@@ -173,7 +151,7 @@ export default class ChronomePreferences extends ExtensionPreferences {
                 active: eventTypes.includes(key),
             });
             row.connect('notify::active', () => {
-                this._updateEventTypes(settings, key, row.active);
+                this._toggleStrvMember(settings, 'event-types', key, row.active);
             });
             eventTypesGroup.add(row);
         }
@@ -191,10 +169,6 @@ export default class ChronomePreferences extends ExtensionPreferences {
             values = values.filter(v => v !== value);
         }
         settings.set_strv(key, values);
-    }
-
-    _updateEventTypes(settings, eventType, enabled) {
-        this._toggleStrvMember(settings, 'event-types', eventType, enabled);
     }
 
     _buildCalendarsPage(settings) {
@@ -244,7 +218,6 @@ export default class ChronomePreferences extends ExtensionPreferences {
 
             const enabledSources = sources.filter(s => s.get_enabled());
 
-            // Deduplicate sources by calendar ID (keeps owner's version for shared calendars)
             const dedupedSources = deduplicateSources(enabledSources, registry);
 
             const sortedSources = dedupedSources.sort((a, b) =>
@@ -259,13 +232,19 @@ export default class ChronomePreferences extends ExtensionPreferences {
                 return;
             }
 
+            // Re-adding an account yields new source UIDs; stale ones filter every event out.
+            const known = enabledCalendars.filter(uid => registry.ref_source(uid) !== null);
+            if (known.length !== enabledCalendars.length) {
+                settings.set_strv('enabled-calendars', known);
+            }
+
             for (const source of sortedSources) {
                 const sourceUid = source.get_uid();
                 const sourceName = source.get_display_name();
 
                 const calendarRow = new Adw.SwitchRow({
                     title: sourceName,
-                    active: enabledCalendars.includes(sourceUid),
+                    active: known.includes(sourceUid),
                     use_markup: false,
                 });
 

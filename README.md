@@ -31,9 +31,6 @@ cd Chronome
 # Install it (--force replaces any previous install)
 gnome-extensions install --force chronome@herzog.tech.zip
 
-# Compile the settings schema
-glib-compile-schemas ~/.local/share/gnome-shell/extensions/chronome@herzog.tech/schemas/
-
 # Enable the extension
 gnome-extensions enable chronome@herzog.tech
 ```
@@ -78,7 +75,7 @@ Zoom, Microsoft Teams, Google Meet, Webex, Jitsi, GoToMeeting, BlueJeans, Whereb
 
 ## License
 
-The MIT License (MIT)
+The source code is under the MIT License (MIT). `calendar-clock-duotone-light-full.svg` and `.png` are Font Awesome Pro artwork, © Fonticons, Inc., used under the Font Awesome Pro license and not covered by the grant below. The video conference URL patterns in `lib/meetingServices.js` derive from [MeetingBar](https://github.com/leits/MeetingBar) and carry its Apache-2.0 terms.
 
 Copyright © 2026 Leo Herzog
 

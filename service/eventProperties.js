@@ -3,9 +3,8 @@
 
 import GLib from 'gi://GLib';
 
-// ICalGLib 3.0 or 4.0. See AGENTS.md "GI Module Versions" section. service.js
-// imports ECal before this module, so EDS has already loaded the matching
-// ICalGLib typelib by the time the unversioned import here is resolved.
+// ECal loads the ICalGLib version EDS was built against, so the unversioned import below reuses it.
+import 'gi://ECal?version=2.0';
 import ICalGLib from 'gi://ICalGLib';
 
 import {resolveTimezone} from '../lib/icalParser.js';
@@ -15,20 +14,19 @@ import {findMeetingUrl} from '../lib/meetingServices.js';
 
 export function icalTimeToTimestamp(icalTime) {
     if (!icalTime) return null;
-    const timeValue = icalTime;
 
-    const year = timeValue.get_year();
-    const month = timeValue.get_month();
-    const day = timeValue.get_day();
-    const hour = timeValue.get_hour();
-    const minute = timeValue.get_minute();
-    const second = timeValue.get_second();
+    const year = icalTime.get_year();
+    const month = icalTime.get_month();
+    const day = icalTime.get_day();
+    const hour = icalTime.get_hour();
+    const minute = icalTime.get_minute();
+    const second = icalTime.get_second();
 
-    if (timeValue.is_utc())
+    if (icalTime.is_utc())
         return Date.UTC(year, month - 1, day, hour, minute, second);
 
     let tz;
-    const tzid = timeValue.get_tzid();
+    const tzid = icalTime.get_tzid();
     if (tzid)
         tz = resolveTimezone(tzid);
     else
@@ -40,7 +38,6 @@ export function icalTimeToTimestamp(icalTime) {
 }
 
 export function getEventStart(event) {
-    if (!event) return 0;
     if (event._instanceStart) return event._instanceStart;
     const dtStart = event.get_dtstart();
     if (dtStart) {
@@ -51,7 +48,6 @@ export function getEventStart(event) {
 }
 
 export function getEventEnd(event) {
-    if (!event) return 0;
     if (event._instanceEnd) return event._instanceEnd;
     const dtEnd = event.get_dtend();
     if (dtEnd) {
@@ -62,7 +58,6 @@ export function getEventEnd(event) {
 }
 
 export function getPropertyString(event, methodName) {
-    if (!event) return null;
     return event[methodName]() || null;
 }
 
@@ -71,7 +66,6 @@ export function getEventTitle(event) {
 }
 
 export function isAllDayEvent(event) {
-    if (!event) return false;
     const dtStart = event.get_dtstart();
     if (dtStart && dtStart.is_date()) return true;
     const startTime = getEventStart(event);
@@ -80,9 +74,7 @@ export function isAllDayEvent(event) {
 }
 
 export function hasCurrentUserPartstat(event, targetPartstat) {
-    if (!event) return false;
     const comp = event._comp;
-    if (!comp) return false;
     const accountEmail = event._accountEmail;
     if (!accountEmail) return false;
 
@@ -97,10 +89,9 @@ export function hasCurrentUserPartstat(event, targetPartstat) {
 
     let prop = comp.get_first_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
     while (prop) {
-        let email = prop.get_value_as_string() || '';
+        let email = (prop.get_value_as_string() || '').toLowerCase();
         if (email.startsWith('mailto:'))
             email = email.substring(7);
-        email = email.toLowerCase();
 
         if (email === accountEmail) {
             const param = prop.get_first_parameter(ICalGLib.ParameterKind.PARTSTAT_PARAMETER);
@@ -114,25 +105,21 @@ export function hasCurrentUserPartstat(event, targetPartstat) {
 }
 
 export function isDeclinedEvent(event) {
-    if (!event) return false;
     if (hasCurrentUserPartstat(event, 'DECLINED')) return true;
-    const title = getEventTitle(event).toLowerCase();
-    return title.includes('declined:') || title.includes('rejected:');
+    // Title-prefix fallback for sources where no account e-mail resolves, so PARTSTAT cannot be matched.
+    return /^(declined|rejected):/.test(getEventTitle(event).toLowerCase());
 }
 
 export function isTentativeEvent(event) {
-    if (!event) return false;
     if (hasCurrentUserPartstat(event, 'TENTATIVE')) return true;
     return event.get_status() === ICalGLib.PropertyStatus.TENTATIVE;
 }
 
 export function isNeedsResponseEvent(event) {
-    if (!event) return false;
     return hasCurrentUserPartstat(event, 'NEEDS-ACTION');
 }
 
 export function findVideoLink(event) {
-    if (!event) return null;
     const location = getPropertyString(event, 'get_location');
     if (location) {
         const url = findMeetingUrl(location);
@@ -143,8 +130,7 @@ export function findVideoLink(event) {
         const url = findMeetingUrl(description);
         if (url) return url;
     }
-    const icalStr = event.get_as_string() || '';
-    return icalStr ? findMeetingUrl(icalStr) : null;
+    return findMeetingUrl(event.get_as_string() || '');
 }
 
 export function wrapICalComponent(comp, instanceStartMs, instanceEndMs, accountEmail, calendarColor, recurrenceIdStartMs = null) {

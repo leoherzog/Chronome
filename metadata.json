@@ -2,7 +2,6 @@
   "name": "Chronome",
   "description": "Show upcoming meetings on your calendar",
   "uuid": "chronome@herzog.tech",
-  "version": 5,
   "version-name": "1.2.0",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "url": "https://github.com/leoherzog/chronome",

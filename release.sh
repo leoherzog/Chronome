@@ -18,6 +18,7 @@ zip -r "$OUTPUT_FILE" \
     service.js \
     prefs.js \
     stylesheet.css \
+    LICENSE \
     lib/ \
     service/ \
     ui/ \
