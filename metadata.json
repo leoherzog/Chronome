@@ -2,7 +2,7 @@
   "name": "Chronome",
   "description": "Show upcoming meetings on your calendar",
   "uuid": "chronome@herzog.tech",
-  "version-name": "1.2.0",
+  "version-name": "1.2.1",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
   "url": "https://github.com/leoherzog/chronome",
   "settings-schema": "org.gnome.shell.extensions.chronome",
