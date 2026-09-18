@@ -1,5 +1,6 @@
 // Loaded only by the GNOME Shell process (never by prefs.js).
 
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
@@ -373,6 +374,11 @@ export const ChronomeIndicator = GObject.registerClass({
 
             if (videoLink) {
                 menuItem.connect('activate', () => {
+                    if (this._settings.get_string('link-click-action') === 'copy') {
+                        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, videoLink);
+                        Main.notify(_('Chronome'), _('Meeting link copied to clipboard'));
+                        return;
+                    }
                     try {
                         Gio.AppInfo.launch_default_for_uri(videoLink, global.create_app_launch_context(0, -1));
                     } catch (e) {

@@ -227,6 +227,7 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
   - JSON serialization and D-Bus signal emission
   - GSettings monitoring for data-affecting settings
   - Per-source teardown through `_dropSource(uid)`, which stops the client view via `_stopView(view)` and drops the client, its metadata and its rescheduled cache
+| `link-click-action` | Extension (read on each menu item click) |
 
 - **service/**: Modules loaded only by the service process:
   - `eventProperties.js` - Component property readers, PARTSTAT participation, all-day detection, video link detection, wrapping `ICalGLib.Component` into plain event wrappers
@@ -428,6 +429,7 @@ import {functionName} from '../lib/moduleName.js';  // from ui/ or service/
 
 Chronome is submitted to extensions.gnome.org, so edits must stay inside the [review guidelines](https://gjs.guide/extensions/review-guidelines/review-guidelines.html) and [best practices](https://gjs.guide/extensions/review-guidelines/best-practices.html). The rules this file does not cover elsewhere:
 
+| `link-click-action` | string | 'open' | What clicking an event does with its meeting link ('open' or 'copy') |
 - No `?.()` or `typeof x === 'function'` on a guaranteed API
 - Lines of 200 columns at most
 - A custom `destroy()` runs in this order: sources, signals, references, then `super.destroy()`
@@ -439,6 +441,7 @@ Chronome is submitted to extensions.gnome.org, so edits must stay inside the [re
 1. **Check the cancellable**: a continuation that resumes after an `await` re-checks `this._cancellable.is_cancelled()` before touching state. `_shutdown()` cancels it and never nulls it, so it stays readable for the life of the process. Do not add a separate shutdown boolean.
 
 2. **Awaited EDS calls**: the service promisifies its EDS calls and awaits them, filtering `CANCELLED` out of the catch:
+- `link-click-action` (no signal; read when a menu item is activated)
    ```javascript
    if (this._cancellable.is_cancelled()) return;
    try {
@@ -491,6 +494,7 @@ Calls whose `*_finish` returns the value directly (`ECal.Client.connect`, `Sourc
 
 Always disconnect signals during cleanup, collecting their ids in an array:
 - **ui/indicator.js**: In `destroy()` of `ChronomeIndicator`
+- Clipboard access must be declared in the `metadata.json` description
 - **service.js**: In `_shutdown()`, for both `_settingsSignals` and `_registrySignals`
 
 ```javascript

@@ -71,6 +71,14 @@ export default class ChronomePreferences extends ExtensionPreferences {
             {key: 'show-event-end-time', title: _('Show Event End Time'), subtitle: _('Display end time alongside start time')},
         ]);
 
+        this._addComboRow(settingsGroup, settings, {
+            key: 'link-click-action',
+            title: _('When Clicking a Link'),
+            subtitle: _('What clicking an event does with its meeting link'),
+            values: ['open', 'copy'],
+            labels: [_('Open in Web Browser'), _('Copy to Clipboard')],
+        });
+
         page.add(settingsGroup);
 
         const aboutGroup = new Adw.PreferencesGroup({

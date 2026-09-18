@@ -69,6 +69,16 @@
       <description>Whether to show the ongoing meeting instead of the next one</description>
     </key>
 
+    <key name="link-click-action" type="s">
+      <default>'open'</default>
+      <choices>
+        <choice value="open"/>
+        <choice value="copy"/>
+      </choices>
+      <summary>Link click action</summary>
+      <description>What clicking an event does with its meeting link: open it in the web browser (open) or copy it to the clipboard (copy)</description>
+    </key>
+
     <key name="enabled-calendars" type="as">
       <default>[]</default>
       <summary>Enabled calendars</summary>

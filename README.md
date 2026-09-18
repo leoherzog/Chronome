@@ -64,6 +64,7 @@ gnome-extensions prefs chronome@herzog.tech
 | Event Types | Toggle all-day, regular, declined, and tentative events |
 | Show Past Events | Include events that have already ended in the menu |
 | Show Event End Time | Display event end times in the dropdown menu |
+| When Clicking a Link | Open the meeting link in the web browser, or copy it to the clipboard |
 | Refresh Interval | How often to re-fetch events from Evolution Data Server |
 | Enabled Calendars | Select which calendars to display |
 
