@@ -70,7 +70,7 @@ gnome-extensions prefs chronome@herzog.tech
 
 ## Supported Video Conferencing Services
 
-Chronome detects video conference links in event locations and descriptions. Supported services include:
+Chronome reads the conference link property a calendar server attaches to an event, and otherwise detects links in event locations and descriptions. Supported services include:
 
 Zoom, Microsoft Teams, Google Meet, Webex, Jitsi, GoToMeeting, BlueJeans, Whereby, Around, Gather, Discord, Slack, FaceTime, Amazon Chime, RingCentral, Livestorm, Vowel, Zhumu, Lark, Feishu, VooV, Skype, Pop, Chorus, Gong, Demodesk, Join.me, and many more.
 
