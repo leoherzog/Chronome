@@ -9,6 +9,10 @@ import {parseIcalDateTime} from '../lib/icalParser.js';
 import {ONE_HOUR_MS} from '../lib/constants.js';
 import {icalTimeToTimestamp, wrapICalComponent} from './eventProperties.js';
 
+// The backend filters the range in UTC and resolves all-day and floating times against its own default zone,
+// so the query is a day wider on each side and queryEventsAsync() clips the result to today's local bounds.
+const QUERY_RANGE_PAD_SEC = 24 * 60 * 60;
+
 export function generateInstancesAsync(service, client, startTimet, endTimet, cancellable) {
     return new Promise((resolve, reject) => {
         const id = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
@@ -49,13 +53,15 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
     if (service._rescheduledCache.has(sourceUid))
         return service._rescheduledCache.get(sourceUid);
 
-    const {accountEmail, calendarColor} = service._getSourceMetadata(sourceUid);
+    const sourceMetadata = service._getSourceMetadata(sourceUid);
     const result = { rescheduledFromToday: new Set(), movedToToday: [] };
 
-    const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
+    // Matches recurring masters and detached instances. The local backend rejects an argument here.
+    const query = '(has-recurrences?)';
     let storedComps;
     try {
-        [storedComps] = await client.get_object_list_as_comps(query, service._cancellable);
+        // An empty list makes the finish function return false, so the promise resolves to [false, []], not [[]].
+        storedComps = (await client.get_object_list_as_comps(query, service._cancellable)).at(-1);
     } catch (e) {
         if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED)) return result;
         service._logSourceFailure(sourceUid,
@@ -91,7 +97,7 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
                 const instanceEndMs = parsedEnd?.timestampMs || (instanceStartMs + ONE_HOUR_MS);
                 result.movedToToday.push(
                     wrapICalComponent(icalComp, instanceStartMs, instanceEndMs,
-                        accountEmail, calendarColor, parsedRecurId.timestampMs)
+                        sourceMetadata, parsedRecurId.timestampMs)
                 );
             }
         }
@@ -109,8 +115,8 @@ export async function queryEventsAsync(service, client, sourceUid) {
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
     const todayStartMs = todayStart.getTime();
     const todayEndMs = todayEnd.getTime();
-    const startTimet = Math.floor(todayStartMs / 1000);
-    const endTimet = Math.floor(todayEndMs / 1000);
+    const startTimet = Math.floor(todayStartMs / 1000) - QUERY_RANGE_PAD_SEC;
+    const endTimet = Math.floor(todayEndMs / 1000) + QUERY_RANGE_PAD_SEC;
     const todayDateStr = `${todayStart.getFullYear()}${String(todayStart.getMonth() + 1).padStart(2, '0')}${String(todayStart.getDate()).padStart(2, '0')}`;
 
     const {rescheduledFromToday, movedToToday} = await buildRescheduledMapAsync(
@@ -133,13 +139,14 @@ export async function queryEventsAsync(service, client, sourceUid) {
         const recurrenceId = rawRecurrenceId && !rawRecurrenceId.is_null_time() ? rawRecurrenceId : null;
         let instanceStartMs = inst.startMs;
         let instanceEndMs = inst.endMs;
-        let recurrenceIdStartMs = recurrenceId ? icalTimeToTimestamp(recurrenceId) : null;
+        let recurrenceIdStartMs = null;
 
         if (recurrenceId) {
             const icalStr = inst.comp.as_ical_string();
             const parsedRecurId = parseIcalDateTime(icalStr, 'RECURRENCE-ID');
-            if (!recurrenceIdStartMs && parsedRecurId?.timestampMs)
-                recurrenceIdStartMs = parsedRecurId.timestampMs;
+            // get_recurrenceid() ignores the TZID parameter, and the dedupe key has to equal the parsed instant
+            // that the movedToToday copy of the same detached instance carries.
+            recurrenceIdStartMs = parsedRecurId?.timestampMs || icalTimeToTimestamp(recurrenceId);
 
             const parsedStart = parseIcalDateTime(icalStr, 'DTSTART');
             const parsedEnd = parseIcalDateTime(icalStr, 'DTEND');
@@ -154,11 +161,13 @@ export async function queryEventsAsync(service, client, sourceUid) {
             }
         }
 
-        if (recurrenceId && rescheduledFromToday.has(inst.comp.get_uid())) continue;
+        // EDS stamps a RECURRENCE-ID on every expanded occurrence, and the padded range also returns yesterday's
+        // and tomorrow's, so only today's slot of a rescheduled series is skipped.
+        const recurrenceIdIsToday = recurrenceIdStartMs !== null && recurrenceIdStartMs >= todayStartMs && recurrenceIdStartMs <= todayEndMs;
+        if (recurrenceIdIsToday && rescheduledFromToday.has(inst.comp.get_uid())) continue;
 
-        const {accountEmail, calendarColor} = service._getSourceMetadata(sourceUid);
         instances.push(wrapICalComponent(inst.comp, instanceStartMs, instanceEndMs,
-            accountEmail, calendarColor, recurrenceIdStartMs));
+            service._getSourceMetadata(sourceUid), recurrenceIdStartMs));
     }
 
     instances.push(...movedToToday);

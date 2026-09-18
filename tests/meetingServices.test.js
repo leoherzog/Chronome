@@ -49,6 +49,53 @@ describe('findMeetingUrl', function() {
         expect(result).toContain('zoomgov.com');
     });
 
+    it('should keep ZoomGov passcodes containing - _ . + and /', function() {
+        const urls = [
+            'https://www.zoomgov.com/j/16111111111?pwd=abc-DEF123-GHI',
+            'https://www.zoomgov.com/j/16111111111?pwd=abc_DEF_123',
+            'https://www.zoomgov.com/j/16111111111?pwd=abcDEF123ghi.1',
+            'https://www.zoomgov.com/j/16111111111?pwd=abc+DEF+123',
+            'https://www.zoomgov.com/j/16111111111?pwd=abc/DEF/123',
+            'https://www.zoomgov.com/j/16111111111?pwd=a-b_c.d+e/f&uname=Jo',
+        ];
+        for (const url of urls)
+            expect(findMeetingUrl(url)).toBe(url);
+    });
+
+    it('should find ZoomGov personal room, webinar and registration URLs', function() {
+        const urls = [
+            'https://agency.zoomgov.com/my/jane.doe',
+            'https://www.zoomgov.com/w/1601234567?tk=abc-DEF_123',
+            'https://www.zoomgov.com/s/1601234567',
+            'https://www.zoomgov.com/webinar/register/WN_abc-DEF_123',
+            'https://my-agency.zoomgov.com/j/1601234567',
+        ];
+        for (const url of urls)
+            expect(findMeetingUrl(url)).toBe(url);
+    });
+
+    it('should leave sentence punctuation out of a ZoomGov URL', function() {
+        const url = 'https://www.zoomgov.com/j/16111111111?pwd=abc-DEF.1';
+        expect(findMeetingUrl(`Join at ${url}.`)).toBe(url);
+        expect(findMeetingUrl(`Dial in (or use ${url}) before noon.`)).toBe(url);
+        expect(findMeetingUrl(`The link (${url}).`)).toBe(url);
+        expect(findMeetingUrl(`Link: ${url}, passcode follows`)).toBe(url);
+    });
+
+    it('should not match ZoomGov pages that are not meetings', function() {
+        expect(findMeetingUrl('https://www.zoomgov.com/')).toBeNull();
+        expect(findMeetingUrl('https://www.zoomgov.com/j/')).toBeNull();
+        expect(findMeetingUrl('https://www.zoomgov.com/signin')).toBeNull();
+    });
+
+    it('should require a dot or the scheme directly before zoomgov.com', function() {
+        expect(findMeetingUrl('https://notzoomgov.com/j/123')).toBeNull();
+        expect(findMeetingUrl('https://www.notzoomgov.com/j/123')).toBeNull();
+        expect(findMeetingUrl('https://zoomgov.com.example.com/j/123')).toBeNull();
+        expect(findMeetingUrl('https://zoomgov.com/j/123')).toBe('https://zoomgov.com/j/123');
+        expect(findMeetingUrl('https://a.b-c.zoomgov.com/j/123')).toBe('https://a.b-c.zoomgov.com/j/123');
+    });
+
     // Microsoft Teams
     it('should find Microsoft Teams URLs', function() {
         const text = 'Teams: https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc';
@@ -61,6 +108,107 @@ describe('findMeetingUrl', function() {
         const result = findMeetingUrl('https://gov.teams.microsoft.us/l/meetup-join/abc');
         expect(result).not.toBeNull();
         expect(result).toContain('teams.microsoft');
+    });
+
+    it('should return a whole Teams meetup-join URL with its context query', function() {
+        const url = 'https://teams.microsoft.com/l/meetup-join/19%3ameeting_MjA0ZGY1-abc%40thread.v2/0' +
+            '?context=%7b%22Tid%22%3a%2272f988bf-86f1%22%2c%22Oid%22%3a%224b4b1a1e-0c9d%22%7d';
+        expect(findMeetingUrl(url)).toBe(url);
+        expect(findMeetingUrl(`${url}&anon=true`)).toBe(`${url}&anon=true`);
+    });
+
+    it('should find Teams meetup-join URLs on every supported host', function() {
+        const hosts = ['teams.microsoft.com', 'teams.microsoft.us', 'gov.teams.microsoft.us', 'dod.teams.microsoft.us',
+            'teams.live.com', 'teams.cloud.microsoft'];
+        for (const host of hosts) {
+            const url = `https://${host}/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%22Tid%22%7d`;
+            expect(findMeetingUrl(url)).toBe(url);
+        }
+    });
+
+    it('should find short Teams /meet/ URLs with their passcode', function() {
+        const urls = [
+            'https://teams.microsoft.com/meet/1234567890?p=AbCdEf',
+            'https://teams.live.com/meet/9312345678?p=xyz',
+            'https://teams.live.com/meet/9425716001426?p=0SystrMw2goKHi8LK6',
+            'https://teams.cloud.microsoft/meet/1234567890123?p=Aa1Bb2Cc3Dd4Ee5',
+            'https://teams.microsoft.us/meet/1234567890123?p=Aa1Bb2Cc3Dd4Ee5',
+            'https://gov.teams.microsoft.us/meet/1234567890123?p=Aa1Bb2Cc3Dd4Ee5',
+            'https://teams.microsoft.com/meet/1234567890123?p=Aa1-Bb2_Cc3',
+            'https://teams.microsoft.com/meet/1234567890123?p=Aa1Bb2Cc3Dd4Ee5&anon=true',
+        ];
+        for (const url of urls)
+            expect(findMeetingUrl(url)).toBe(url);
+    });
+
+    it('should leave sentence punctuation out of a Teams URL', function() {
+        const short = 'https://teams.microsoft.com/meet/1234567890?p=AbCdEf';
+        const long = 'https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%22Tid%22%7d';
+        expect(findMeetingUrl(`Join here: ${short}.`)).toBe(short);
+        expect(findMeetingUrl(`Join (${short}) at noon.`)).toBe(short);
+        expect(findMeetingUrl(`Join <${short}> at noon.`)).toBe(short);
+        expect(findMeetingUrl(`Join here: ${long}. See you there.`)).toBe(long);
+        expect(findMeetingUrl(`Join (${long}).`)).toBe(long);
+    });
+
+    it('should stop a Teams URL before an HTML-escaped ampersand', function() {
+        const url = 'https://teams.microsoft.com/l/meetup-join/abc';
+        expect(findMeetingUrl(`<a href="${url}&amp;anon=true">Join</a>`)).toBe(url);
+        expect(findMeetingUrl(`${url}&amp;`)).toBe(url);
+        expect(findMeetingUrl(`${url}?a=1&amplitude=2`)).toBe(`${url}?a=1&amplitude=2`);
+        expect(findMeetingUrl('https://teams.microsoft.com/meet/1234567890?p=AbCdEf&amp;x=1')).toBe('https://teams.microsoft.com/meet/1234567890?p=AbCdEf');
+    });
+
+    it('should not match Teams pages that are not meetings', function() {
+        const urls = [
+            'https://teams.microsoft.com/',
+            'https://teams.microsoft.com/v2/',
+            'https://teams.microsoft.com/l/meeting/new?subject=Standup',
+            'https://teams.microsoft.com/l/channel/19%3aabc%40thread.tacv2/General?groupId=1',
+            'https://teams.microsoft.com/l/chat/0/0?users=someone@example.com',
+            'https://teams.microsoft.com/l/meetup-join/',
+            'https://teams.microsoft.com/meet/1234567890123',
+            'https://teams.live.com/meet/9425716001426',
+            'https://teams.microsoft.com/meet/channel?p=Aa1Bb2Cc3Dd4Ee5',
+            'https://teams.cloud.microsoft/',
+            'https://teams.cloud.microsoft.example.com/meet/1234567890?p=AbCdEf',
+            'https://notteams.live.com/meet/1234567890?p=AbCdEf',
+        ];
+        for (const url of urls)
+            expect(findMeetingUrl(url)).toBeNull();
+    });
+
+    it('should prefer the Teams pattern over Skype for Business Self-hosted', function() {
+        const teams = 'https://teams.microsoft.com/meet/1234567890?p=AbCdEf';
+        const skype = 'https://meet.contoso.com/contoso.com/meet/jane.doe/ABC123';
+        expect(findMeetingUrl(skype)).toBe(skype);
+        expect(findMeetingUrl(`Legacy: ${skype} or Teams: ${teams}`)).toBe(teams);
+        expect(findMeetingUrl(`https://join.contoso.com/?url=${teams}`)).toBe(teams);
+    });
+
+    it('should stop a link at an escaped newline in serialized iCal text', function() {
+        const teams = 'https://teams.microsoft.com/meet/1234567890?p=AbCdEf';
+        const zoomGov = 'https://www.zoomgov.com/j/16111111111?pwd=abc-DEF_1.2+3/4';
+        expect(findMeetingUrl(`DESCRIPTION:Join the meeting now\\n${teams}\\nMeeting ID: 123 456 789 0\\nPasscode: AbCdEf`)).toBe(teams);
+        expect(findMeetingUrl(`DESCRIPTION:Join ZoomGov Meeting\\n${zoomGov}\\n\\nMeeting ID: 161 1111 1111`)).toBe(zoomGov);
+    });
+
+    it('should find links in an unfolded iCal DESCRIPTION', function() {
+        const unfold = ical => ical.replace(/\r?\n[ \t]/g, '');
+        const teams = 'https://teams.microsoft.com/meet/1234567890123?p=Aa1Bb2Cc3Dd4Ee5';
+        const foldedTeams = 'DESCRIPTION:Microsoft Teams Need help?\\nJoin the meeting now: https://teams.mi\r\n crosoft.com/meet/12345678' +
+            '\r\n 90123?p=Aa1Bb2Cc3\r\n Dd4Ee5\\nMeeting ID: 123 456 789 012 3\r\n';
+        expect(findMeetingUrl(unfold(foldedTeams))).toBe(teams);
+
+        const zoomGov = 'https://www.zoomgov.com/j/16111111111?pwd=abc-DEF_1.2+3/4';
+        const foldedZoomGov = 'DESCRIPTION:Join ZoomGov Meeting\\nhttps://www.zoomgov.com/j/161111\r\n 11111?pwd=abc-DEF_\r\n 1.2+3/4\\n\\nMeeting ID: 161 1111 1111\r\n';
+        expect(findMeetingUrl(unfold(foldedZoomGov))).toBe(zoomGov);
+    });
+
+    it('should not read across an iCal line fold, so findConferenceLink() unfolds first', function() {
+        const folded = 'DESCRIPTION:https://www.zoomgov.com/j/16111111111?pwd=abc-\r\n DEF_123\r\n';
+        expect(findMeetingUrl(folded)).toBe('https://www.zoomgov.com/j/16111111111?pwd=abc-');
+        expect(findMeetingUrl('DESCRIPTION:https://teams.microsoft.com/meet/12345\r\n 67890?p=AbCdEf\r\n')).toBeNull();
     });
 
     // Webex

@@ -8,6 +8,8 @@ print('Chronome Test Suite');
 print('='.repeat(50));
 
 await import('./meetingServices.test.js');
+await import('./conferenceLink.test.js');
+await import('./rsvp.test.js');
 await import('./formatting.test.js');
 await import('./icalParser.test.js');
 await import('./eventUtils.test.js');

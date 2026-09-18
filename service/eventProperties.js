@@ -4,13 +4,14 @@
 import GLib from 'gi://GLib';
 
 // ECal loads the ICalGLib version EDS was built against, so the unversioned import below reuses it.
-import 'gi://ECal?version=2.0';
+import ECal from 'gi://ECal?version=2.0';
 import ICalGLib from 'gi://ICalGLib';
 
 import {resolveTimezone} from '../lib/icalParser.js';
 import {isAllDayEventHeuristic} from '../lib/eventUtils.js';
 import {ONE_HOUR_MS} from '../lib/constants.js';
-import {findMeetingUrl} from '../lib/meetingServices.js';
+import {findConferenceLink, LINK_PROPERTY_NAMES} from '../lib/conferenceLink.js';
+import {getUserPartstat} from '../lib/rsvp.js';
 
 export function icalTimeToTimestamp(icalTime) {
     if (!icalTime) return null;
@@ -73,35 +74,14 @@ export function isAllDayEvent(event) {
     return isAllDayEventHeuristic(startTime, endTime);
 }
 
+// targetPartstat is an upper-case PARTSTAT value such as 'DECLINED' or 'NEEDS-ACTION'.
 export function hasCurrentUserPartstat(event, targetPartstat) {
-    const comp = event._comp;
-    const accountEmail = event._accountEmail;
-    if (!accountEmail) return false;
-
-    const partstatMap = {
-        'DECLINED': ICalGLib.ParameterPartstat.DECLINED,
-        'TENTATIVE': ICalGLib.ParameterPartstat.TENTATIVE,
-        'NEEDS-ACTION': ICalGLib.ParameterPartstat.NEEDSACTION,
-        'ACCEPTED': ICalGLib.ParameterPartstat.ACCEPTED,
-    };
-    const targetValue = partstatMap[targetPartstat];
-    if (targetValue === undefined) return false;
-
-    let prop = comp.get_first_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
-    while (prop) {
-        let email = (prop.get_value_as_string() || '').toLowerCase();
-        if (email.startsWith('mailto:'))
-            email = email.substring(7);
-
-        if (email === accountEmail) {
-            const param = prop.get_first_parameter(ICalGLib.ParameterKind.PARTSTAT_PARAMETER);
-            return param ? param.get_partstat() === targetValue : false;
-        }
-
-        prop = comp.get_next_property(ICalGLib.PropertyKind.ATTENDEE_PROPERTY);
-    }
-
-    return false;
+    return getUserPartstat({
+        attendees: event._attendees,
+        accountEmail: event._accountEmail,
+        backendName: event._backendName,
+        status: event._status,
+    }) === targetPartstat;
 }
 
 export function isDeclinedEvent(event) {
@@ -112,7 +92,7 @@ export function isDeclinedEvent(event) {
 
 export function isTentativeEvent(event) {
     if (hasCurrentUserPartstat(event, 'TENTATIVE')) return true;
-    return event.get_status() === ICalGLib.PropertyStatus.TENTATIVE;
+    return event._status === 'TENTATIVE';
 }
 
 export function isNeedsResponseEvent(event) {
@@ -120,30 +100,55 @@ export function isNeedsResponseEvent(event) {
 }
 
 export function findVideoLink(event) {
-    const location = getPropertyString(event, 'get_location');
-    if (location) {
-        const url = findMeetingUrl(location);
-        if (url) return url;
+    if (event._videoLink === undefined) {
+        event._videoLink = findConferenceLink({
+            properties: event._linkProperties,
+            location: getPropertyString(event, 'get_location'),
+            description: getPropertyString(event, 'get_description'),
+            isAllDay: isAllDayEvent(event),
+            fullText: () => event.get_as_string() || '',
+        });
     }
-    const description = getPropertyString(event, 'get_description');
-    if (description) {
-        const url = findMeetingUrl(description);
-        if (url) return url;
-    }
-    return findMeetingUrl(event.get_as_string() || '');
+    return event._videoLink;
 }
 
-export function wrapICalComponent(comp, instanceStartMs, instanceEndMs, accountEmail, calendarColor, recurrenceIdStartMs = null) {
-    const passthroughMethods = ['get_summary', 'get_uid', 'get_location',
-        'get_description', 'get_dtstart', 'get_dtend', 'get_status'];
+// sourceMetadata is the object service._getSourceMetadata() returns.
+export function wrapICalComponent(comp, instanceStartMs, instanceEndMs, sourceMetadata, recurrenceIdStartMs = null) {
+    const passthroughMethods = ['get_summary', 'get_uid', 'get_location', 'get_description', 'get_dtstart', 'get_dtend'];
+    const attendees = [];
+    const linkProperties = [];
+    let status = null;
+
+    // A component has one shared property iterator, and every component getter (get_summary() and the like)
+    // restarts it. Touch only `prop` inside this loop; its parameters have an iterator of their own.
+    const anyProperty = ICalGLib.PropertyKind.ANY_PROPERTY;
+    for (let prop = comp.get_first_property(anyProperty); prop; prop = comp.get_next_property(anyProperty)) {
+        // get_property_name() returns the X- name for X properties, and CONFERENCE has no typed accessor in ICalGLib 3.0.
+        const name = (prop.get_property_name() || '').toUpperCase();
+        if (name === 'ATTENDEE') {
+            attendees.push({
+                // Exchange and iCloud carry the address in an EMAIL parameter, which this reads before the value.
+                email: ECal.util_get_property_email(prop)?.toLowerCase() || null,
+                partstat: prop.get_parameter_as_string('PARTSTAT')?.toUpperCase() || null,
+            });
+        } else if (name === 'STATUS') {
+            status ??= prop.get_value_as_string()?.toUpperCase() || null;
+        } else if (LINK_PROPERTY_NAMES.has(name)) {
+            linkProperties.push({name, value: prop.get_value_as_string() || ''});
+        }
+    }
 
     const wrapper = {
         _instanceStart: instanceStartMs,
         _instanceEnd: instanceEndMs,
         _recurrenceIdStart: recurrenceIdStartMs,
-        _comp: comp,
-        _accountEmail: accountEmail,
-        _calendarColor: calendarColor,
+        _accountEmail: sourceMetadata.accountEmail,
+        _calendarColor: sourceMetadata.calendarColor,
+        _backendName: sourceMetadata.backendName,
+        _attendees: attendees,
+        _status: status,
+        _linkProperties: linkProperties,
+        _videoLink: undefined,
         get_as_string: () => comp.as_ical_string(),
         get_recurid_as_string: () => {
             const recurid = comp.get_recurrenceid();

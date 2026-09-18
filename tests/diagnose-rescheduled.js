@@ -13,6 +13,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import ECal from 'gi://ECal?version=2.0';
+import ICalGLib from 'gi://ICalGLib';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
 import {parseIcalDateTime} from '../lib/icalParser.js';
@@ -20,6 +21,9 @@ import {parseIcalDateTime} from '../lib/icalParser.js';
 Gio._promisify(ECal.Client, 'connect', 'connect_finish');
 Gio._promisify(ECal.Client.prototype, 'get_object_list_as_comps', 'get_object_list_as_comps_finish');
 Gio._promisify(EDataServer.SourceRegistry, 'new', 'new_finish');
+
+// Same padding as service/eventQuery.js.
+const QUERY_RANGE_PAD_SEC = 24 * 60 * 60;
 
 const C = {
     reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -53,6 +57,7 @@ function buildRescheduledMap(comps, todayStartMs, todayEndMs) {
 }
 
 async function run(loop) {
+    let registry = null;
     let skipped = 0;
 
     try {
@@ -67,10 +72,10 @@ async function run(loop) {
         print(`${C.bold}=== Chronome rescheduled-instance diagnostic ===${C.reset}`);
         print(`Today: ${todayStart.toDateString()} (${todayDateStr})\n`);
 
-        const registry = await EDataServer.SourceRegistry.new(null);
+        registry = await EDataServer.SourceRegistry.new(null);
         const sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR)
             .filter(s => s.get_enabled());
-        const query = '(or (has-recurrences? #t) (contains? "recurrence-id" ""))';
+        const query = '(has-recurrences?)';
         const seen = new Set();
 
         for (const source of sources) {
@@ -82,7 +87,11 @@ async function run(loop) {
                 continue;
             }
 
-            const [comps] = await client.get_object_list_as_comps(query, null);
+            const localZone = ICalGLib.Timezone.get_builtin_timezone(GLib.TimeZone.new_local().get_identifier()) ||
+                ECal.util_get_system_timezone();
+            if (localZone) client.set_default_timezone(localZone);
+
+            const comps = (await client.get_object_list_as_comps(query, null)).at(-1);
             const map = buildRescheduledMap(comps, todayStartMs, todayEndMs);
 
             if (map.size === 0) continue;
@@ -97,13 +106,15 @@ async function run(loop) {
 
             const instances = [];
             client.generate_instances_sync(
-                Math.floor(todayStartMs / 1000), Math.floor(todayEndMs / 1000), null, (comp) => {
+                Math.floor(todayStartMs / 1000) - QUERY_RANGE_PAD_SEC, Math.floor(todayEndMs / 1000) + QUERY_RANGE_PAD_SEC, null, (comp) => {
                     instances.push({uid: comp.get_uid(), ical: comp.as_ical_string()});
                     return true;
                 });
 
             for (const inst of instances) {
-                if (!/^RECURRENCE-ID/m.test(inst.ical)) continue;
+                // Every expanded occurrence carries a RECURRENCE-ID, so only today's slot of the series counts.
+                const recurId = parseIcalDateTime(inst.ical, 'RECURRENCE-ID');
+                if (!recurId || recurId.timestampMs < todayStartMs || recurId.timestampMs > todayEndMs) continue;
                 const entry = map.get(inst.uid);
                 if (!entry) continue;
 
@@ -123,6 +134,8 @@ async function run(loop) {
     } catch (e) {
         print(`${C.red}ERROR: ${e}\n${e.stack || ''}${C.reset}`);
     } finally {
+        // An undisposed registry crashes the interpreter's final collection.
+        if (registry) registry.run_dispose();
         loop.quit();
     }
 }

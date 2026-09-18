@@ -7,7 +7,9 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import System from 'system';
 
+// ECal loads the ICalGLib version EDS was built against, so the unversioned import below reuses it.
 import ECal from 'gi://ECal?version=2.0';
+import ICalGLib from 'gi://ICalGLib';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
 import {getAccountEmailForSource, getCalendarColor, deduplicateSources} from './lib/calendarUtils.js';
@@ -56,6 +58,13 @@ function loadSettings() {
     return new Gio.Settings({settings_schema: schema});
 }
 
+// GLib's local zone honours TZ, as Date and icalTimeToTimestamp() do. ECal.util_get_system_timezone() reads only
+// the system configuration, so it is the fallback for an identifier libical does not know.
+function getLocalICalTimezone() {
+    return ICalGLib.Timezone.get_builtin_timezone(GLib.TimeZone.new_local().get_identifier()) ||
+        ECal.util_get_system_timezone();
+}
+
 class ChronomeService {
     constructor() {
         this._settings = loadSettings();
@@ -65,6 +74,7 @@ class ChronomeService {
         this._accountEmails = new Map();
         this._calendarReadonly = new Map();
         this._calendarColors = new Map();
+        this._backendNames = new Map();
         this._rescheduledCache = new Map();
         this._cacheDate = null;
         this._clientViews = new Map();
@@ -180,8 +190,14 @@ class ChronomeService {
         for (const id of this._settingsSignals)
             this._settings.disconnect(id);
 
-        for (const id of this._registrySignals)
-            this._registry.disconnect(id);
+        if (this._registry) {
+            for (const id of this._registrySignals)
+                this._registry.disconnect(id);
+            // Disposing the registry iterates the main context. Left to the interpreter's final collection, that
+            // dispatches a source whose JS callback is already gone and the process dies with SIGSEGV.
+            this._registry.run_dispose();
+            this._registry = null;
+        }
 
         for (const [, viewData] of this._clientViews.entries())
             this._teardownClientView(viewData);
@@ -191,6 +207,7 @@ class ChronomeService {
         this._accountEmails.clear();
         this._calendarReadonly.clear();
         this._calendarColors.clear();
+        this._backendNames.clear();
         this._rescheduledCache.clear();
         this._sourceFailures.clear();
 
@@ -234,6 +251,7 @@ class ChronomeService {
         this._accountEmails.delete(sourceUid);
         this._calendarReadonly.delete(sourceUid);
         this._calendarColors.delete(sourceUid);
+        this._backendNames.delete(sourceUid);
         this._rescheduledCache.delete(sourceUid);
     }
 
@@ -241,6 +259,7 @@ class ChronomeService {
         return {
             accountEmail: this._accountEmails.get(sourceUid) || null,
             calendarColor: this._calendarColors.get(sourceUid) || null,
+            backendName: this._backendNames.get(sourceUid) || null,
         };
     }
 
@@ -382,6 +401,8 @@ class ChronomeService {
 
         for (const client of clients) {
             if (this._cancellable.is_cancelled()) return;
+            // A cached capability read, so a source that cannot refresh costs no D-Bus call and no delay.
+            if (!client.check_refresh_supported()) continue;
 
             await new Promise(r => {
                 const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CONSTANTS.SYNC_DELAY_MS, () => {
@@ -437,6 +458,10 @@ class ChronomeService {
             );
             if (this._cancellable.is_cancelled()) return null;
 
+            // A new client resolves all-day and floating times against UTC.
+            const localZone = getLocalICalTimezone();
+            if (localZone) client.set_default_timezone(localZone);
+
             this._clients.set(sourceUid, client);
             this._sourceFailures.delete(sourceUid);
             const accountEmail = getAccountEmailForSource(source, this._registry);
@@ -444,6 +469,8 @@ class ChronomeService {
             this._calendarReadonly.set(sourceUid, client.is_readonly());
             const calendarColor = getCalendarColor(source);
             if (calendarColor) this._calendarColors.set(sourceUid, calendarColor);
+            const backendName = source.get_extension(EDataServer.SOURCE_EXTENSION_CALENDAR).get_backend_name();
+            if (backendName) this._backendNames.set(sourceUid, backendName);
             this._setupClientViewAsync(client, sourceUid);
 
             return client;
