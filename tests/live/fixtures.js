@@ -161,6 +161,16 @@ export function buildMainCalendar() {
         vevent('recur-foreign', 'Recur Foreign (moved)', foreign(0, '1300'), foreign(0, '1330'),
             [`RECURRENCE-ID${foreign(1, '1200')}`]),
 
+        // Four slots a day on wall-clock hours (BYHOUR survives a DST change; HOURLY;INTERVAL=n drifts).
+        // Today: two slots moved off, one edited in place, one untouched.
+        vevent('recur-four-slots', 'Recur Four Slots', local(-5, '0600'), local(-5, '0630'), ['RRULE:FREQ=DAILY;BYHOUR=6,10,14,22']),
+        vevent('recur-four-slots', 'Recur Four Slots (moved)', local(1, '0645'), local(1, '0715'),
+            [`RECURRENCE-ID${local(0, '0600')}`]),
+        vevent('recur-four-slots', 'Recur Four Slots (moved again)', local(1, '1045'), local(1, '1115'),
+            [`RECURRENCE-ID${local(0, '1000')}`]),
+        vevent('recur-four-slots', 'Recur Four Slots (edited)', local(0, '1415'), local(0, '1445'),
+            [`RECURRENCE-ID${local(0, '1400')}`, `LOCATION:${MEET_LINK}`]),
+
         vevent('recur-allday', 'Recur All Day', allDay(-7), allDay(-6), ['RRULE:FREQ=DAILY']),
     ]);
 }

@@ -3,7 +3,7 @@
 //
 // Reports, per calendar, which detached instances are rescheduled off of today
 // and whether the service's skip map catches each of today's expanded
-// occurrences. Mirrors the classification in service/eventQuery.js.
+// occurrences. Mirrors the classification and the skip key in service/eventQuery.js.
 //
 // Run with:  gjs -m tests/diagnose-rescheduled.js
 //
@@ -17,6 +17,7 @@ import ICalGLib from 'gi://ICalGLib';
 import EDataServer from 'gi://EDataServer?version=1.2';
 
 import {parseIcalDateTime} from '../lib/icalParser.js';
+import {getOccurrenceKey} from '../lib/eventUtils.js';
 
 Gio._promisify(ECal.Client, 'connect', 'connect_finish');
 Gio._promisify(ECal.Client.prototype, 'get_object_list_as_comps', 'get_object_list_as_comps_finish');
@@ -47,7 +48,7 @@ function buildRescheduledMap(comps, todayStartMs, todayEndMs) {
         if (!uid || !recurId || !dtstart) continue;
 
         if (isToday(recurId.timestampMs) && !isToday(dtstart.timestampMs)) {
-            map.set(uid, {
+            map.set(getOccurrenceKey(uid, recurId.timestampMs), {
                 dtstart: new Date(dtstart.timestampMs).toDateString(),
                 summary: icalValue(ical, 'SUMMARY') || '(untitled)',
             });
@@ -112,10 +113,10 @@ async function run(loop) {
                 });
 
             for (const inst of instances) {
-                // Every expanded occurrence carries a RECURRENCE-ID, so only today's slot of the series counts.
+                // Same key as service/eventQuery.js: the slot's RECURRENCE-ID instant is part of it.
                 const recurId = parseIcalDateTime(inst.ical, 'RECURRENCE-ID');
-                if (!recurId || recurId.timestampMs < todayStartMs || recurId.timestampMs > todayEndMs) continue;
-                const entry = map.get(inst.uid);
+                if (!recurId) continue;
+                const entry = map.get(getOccurrenceKey(inst.uid, recurId.timestampMs));
                 if (!entry) continue;
 
                 const summary = icalValue(inst.ical, 'SUMMARY') || '(untitled)';

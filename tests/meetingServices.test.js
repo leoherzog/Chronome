@@ -414,6 +414,32 @@ describe('findMeetingUrl', function() {
     });
 
     // Edge cases
+    // Zhumu
+    it('should find Zhumu URLs with and without a passcode', function() {
+        expect(findMeetingUrl('https://welink.zhumu.com/j/123456789?pwd=abcDEF123'))
+            .toBe('https://welink.zhumu.com/j/123456789?pwd=abcDEF123');
+        expect(findMeetingUrl('https://welink.zhumu.com/j/123456789'))
+            .toBe('https://welink.zhumu.com/j/123456789');
+    });
+
+    it('should find Zhumu web client join URLs', function() {
+        expect(findMeetingUrl('https://welink.zhumu.com/wc/join/123456789?wpk=abc123'))
+            .toBe('https://welink.zhumu.com/wc/join/123456789?wpk=abc123');
+    });
+
+    // Proton Meet
+    it('should find Proton Meet URLs with their password fragment', function() {
+        expect(findMeetingUrl('Join: https://meet.proton.me/join/id-ABC123#pwd-xyz789 today'))
+            .toBe('https://meet.proton.me/join/id-ABC123#pwd-xyz789');
+    });
+
+    // Riverside
+    it('should find Riverside studio URLs', function() {
+        expect(findMeetingUrl('https://riverside.fm/studio/my-show?t=abc'))
+            .toBe('https://riverside.fm/studio/my-show?t=abc');
+        expect(findMeetingUrl('https://riverside.com/studio/my-show')).toContain('riverside.com/studio');
+    });
+
     it('should return null for text without meeting URLs', function() {
         expect(findMeetingUrl('No meeting link here')).toBeNull();
         expect(findMeetingUrl('Just a regular email: test@example.com')).toBeNull();

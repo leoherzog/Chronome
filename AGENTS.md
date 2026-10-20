@@ -139,7 +139,7 @@ The tested modules are `eventUtils.js`, `formatting.js`, `icalParser.js`, `meeti
 
 ### Manual Diagnostics
 
-`tests/diagnose-rescheduled.js` is a manual diagnostic (not part of `runAll.js`) that connects to the live Evolution Data Server. Run it with `gjs -m tests/diagnose-rescheduled.js` to see which detached instances are rescheduled off of today and which of today's expanded occurrences the skip map catches. It sets the client's default zone, pads the range and tests the `RECURRENCE-ID` the same way `service/eventQuery.js` does, so change both together. It is read-only.
+`tests/diagnose-rescheduled.js` is a manual diagnostic (not part of `runAll.js`) that connects to the live Evolution Data Server. Run it with `gjs -m tests/diagnose-rescheduled.js` to see which detached instances are rescheduled off of today and which of today's expanded occurrences the skip map catches. It sets the client's default zone, pads the range and builds the same `uid:recurrenceIdMs` skip key as `service/eventQuery.js`, so change both together. It is read-only.
 
 ## Release and Packaging
 
@@ -328,7 +328,8 @@ Time constants in milliseconds:
 
 ### `eventUtils.js`
 - `hasRecurrenceId(event)` - Check if event is a detached instance
-- `getEventDedupeKey(event, getEventStart)` - Generate UID:timestamp key
+- `getOccurrenceKey(uid, instantMs)` - `uid:instant` key, the occurrence identity shared by the dedupe and the rescheduled skip in `service/eventQuery.js`
+- `getEventDedupeKey(event, getEventStart)` - `getOccurrenceKey()` over a wrapper, using `_recurrenceIdStart` when present
 - `deduplicateEvents(events, getEventStart)` - Remove duplicates, prefer exceptions
 - `isAllDayEventHeuristic(startTime, endTime)` - Detect all-day events
 - `getCurrentMeetings(events, options)` - Ongoing meetings with at least `minRemainingMs` left, sorted by end time
@@ -640,14 +641,14 @@ To correctly handle rescheduled instances efficiently:
    - `has-recurrences?` matches recurring masters and detached instances. It takes no argument: the local backend rejects one and then matches nothing. `contains?` accepts only text fields, never `recurrence-id`.
    - Much smaller dataset than querying all events with `'#t'`
    - Results are cached per calendar source (`_rescheduledCache`)
-2. **Build a rescheduled instances map**: parse `RECURRENCE-ID` and `DTSTART` to instants with `parseIcalDateTime()` and compare them against today's local bounds. A detached instance whose `RECURRENCE-ID` falls inside today and whose `DTSTART` does not is recorded in `rescheduledFromToday`, a `Set` of UIDs. One whose `DTSTART` falls inside today and whose `RECURRENCE-ID` does not is wrapped and stored in `movedToToday`.
+2. **Build a rescheduled instances map**: parse `RECURRENCE-ID` and `DTSTART` to instants with `parseIcalDateTime()` and compare them against today's local bounds. A detached instance whose `RECURRENCE-ID` falls inside today and whose `DTSTART` does not is recorded in `rescheduledFromToday`, a `Set` of `uid:recurrenceIdMs` keys from `getOccurrenceKey()`, the same identity `deduplicateEvents()` uses. One whose `DTSTART` falls inside today and whose `RECURRENCE-ID` does not is wrapped and stored in `movedToToday`.
 3. **Phase 2**: Use `generate_instances_sync()` wrapped in `GLib.idle_add()` to expand recurring events without blocking, over today's range padded by a day on each side (see "Default Timezone and Query Range")
-4. **Skip**: Drop an instance only when its UID is in `rescheduledFromToday` and its own parsed `RECURRENCE-ID` falls inside today. The UID alone is not enough, because every expanded occurrence carries a `RECURRENCE-ID` and the padded range also returns yesterday's and tomorrow's occurrences of the series.
+4. **Skip**: Drop an expanded occurrence when `getOccurrenceKey(uid, parsed RECURRENCE-ID instant)` is in `rescheduledFromToday`. The UID alone would also drop yesterday's and tomorrow's occurrences from the padded range and today's other slots of the same series, because every expanded occurrence carries a `RECURRENCE-ID`. The set holds only today's moved slots, so no separate is-today test is needed on the query side.
 5. **Merge and clip**: Append `movedToToday`, then keep only events that overlap today's local bounds. An instance moved onto today arrives both from the loop and from `movedToToday`, and `deduplicateEvents()` merges the two on `uid:_recurrenceIdStart`.
 
 `_recurrenceIdStart` prefers the `RECURRENCE-ID` parsed from the iCal string and falls back to `icalTimeToTimestamp(get_recurrenceid())`. `get_recurrenceid()` ignores the TZID parameter, so for an event in a foreign zone the two disagree. The `movedToToday` copy carries the parsed instant, and the keys have to be equal for the merge to happen.
 
-A series with two slots today, one moved off today and one modified in place, still loses the second, because the map holds UIDs and both slots have a `RECURRENCE-ID` inside today.
+Two slots of one series on the same day are separate entries, so moving one off today leaves the other in place, edited or not. The live fixture `Recur Four Slots` covers two moved slots, one edited slot and one untouched slot.
 
 ### Caching Strategy
 

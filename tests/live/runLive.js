@@ -255,6 +255,14 @@ function checkInitialPayload(payload) {
             expect(only('Recur Foreign (moved)').startMs).toBe(localMs(0, '1300'));
             expect(only('Recur Foreign').startMs).toBe(localMs(0, '1200'));
         });
+        it('keeps the other slots of a series when two of today\'s slots are moved off', () => {
+            expect(byTitle('Recur Four Slots (moved)').length).toBe(0);
+            expect(byTitle('Recur Four Slots (moved again)').length).toBe(0);
+            expect(only('Recur Four Slots').startMs).toBe(localMs(0, '2200'));
+            const edited = only('Recur Four Slots (edited)');
+            expect(edited.startMs).toBe(localMs(0, '1415'));
+            expect(edited.videoLink).toBe(MEET_LINK);
+        });
     });
 
     describe('Live: payload', () => {

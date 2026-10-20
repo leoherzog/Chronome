@@ -6,6 +6,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {parseIcalDateTime} from '../lib/icalParser.js';
+import {getOccurrenceKey} from '../lib/eventUtils.js';
 import {ONE_HOUR_MS} from '../lib/constants.js';
 import {icalTimeToTimestamp, wrapICalComponent} from './eventProperties.js';
 
@@ -54,6 +55,7 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
         return service._rescheduledCache.get(sourceUid);
 
     const sourceMetadata = service._getSourceMetadata(sourceUid);
+    // Keys are getOccurrenceKey(uid, RECURRENCE-ID instant), so an entry names one slot of a series, not the series.
     const result = { rescheduledFromToday: new Set(), movedToToday: [] };
 
     // Matches recurring masters and detached instances. The local backend rejects an argument here.
@@ -87,7 +89,7 @@ export async function buildRescheduledMapAsync(service, client, sourceUid, today
         const dtstartIsToday = isToday(parsedStart.timestampMs);
 
         if (recurIdIsToday && !dtstartIsToday)
-            result.rescheduledFromToday.add(uid);
+            result.rescheduledFromToday.add(getOccurrenceKey(uid, parsedRecurId.timestampMs));
 
         if (!recurIdIsToday && dtstartIsToday) {
             const icalComp = comp.get_icalcomponent();
@@ -161,10 +163,9 @@ export async function queryEventsAsync(service, client, sourceUid) {
             }
         }
 
-        // EDS stamps a RECURRENCE-ID on every expanded occurrence, and the padded range also returns yesterday's
-        // and tomorrow's, so only today's slot of a rescheduled series is skipped.
-        const recurrenceIdIsToday = recurrenceIdStartMs !== null && recurrenceIdStartMs >= todayStartMs && recurrenceIdStartMs <= todayEndMs;
-        if (recurrenceIdIsToday && rescheduledFromToday.has(inst.comp.get_uid())) continue;
+        // The key carries the slot's RECURRENCE-ID instant, so the series' other slots today and the padded range's
+        // yesterday and tomorrow occurrences never match.
+        if (recurrenceIdStartMs !== null && rescheduledFromToday.has(getOccurrenceKey(inst.comp.get_uid(), recurrenceIdStartMs))) continue;
 
         instances.push(wrapICalComponent(inst.comp, instanceStartMs, instanceEndMs,
             service._getSourceMetadata(sourceUid), recurrenceIdStartMs));

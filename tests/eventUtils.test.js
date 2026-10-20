@@ -3,6 +3,7 @@ import { describe, it, expect } from './runner.js';
 import { createMockEvent } from './mocks.js';
 import {
     hasRecurrenceId,
+    getOccurrenceKey,
     getEventDedupeKey,
     deduplicateEvents,
     isAllDayEventHeuristic,
@@ -104,6 +105,13 @@ describe('getEventDedupeKey', function() {
         // Mock sets _recurrenceIdStart to startTime when recurrenceId is present
         const key = getEventDedupeKey(event, getEventStart);
         expect(key).toContain('recurring');
+    });
+
+    it('equals getOccurrenceKey for the same UID and instant', function() {
+        const detached = createMockEvent({ uid: 'series', startTime: 2000, recurrenceId: 1000 });
+        expect(getEventDedupeKey(detached, getEventStart)).toBe(getOccurrenceKey('series', 1000));
+        const plain = createMockEvent({ uid: 'single', startTime: 3000 });
+        expect(getEventDedupeKey(plain, getEventStart)).toBe(getOccurrenceKey('single', 3000));
     });
 });
 

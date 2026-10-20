@@ -17,6 +17,25 @@ Feature gaps against MeetingBar, Itsycal, Dato, Dot, nextmeeting and the other G
 - [x] Call `client.set_default_timezone()` after connect, and pad the query range by a day on each side. EDS otherwise resolves all-day and floating events against UTC and filters the range in UTC.
 - [x] Use `client.check_refresh_supported()` so the sync loop skips sources that only return `NOT_SUPPORTED`.
 
+## GNOME 51
+
+Shell 51.0 pairs with mutter 51, gjs 1.90, GLib 2.90, GTK 4.24, libadwaita 1.10 and EDS 3.62. Nothing in the porting guide or in those releases removes an API this extension calls. Every claim below is read from tagged source; nothing has run on a 51 session yet.
+
+- [ ] Add `"51"` to `shell-version` in `metadata.json`, and to the version lists in `AGENTS.md` and `README.md`.
+  - Without it the Shell marks the extension out of date and never enables it.
+  - Rerun `release.sh` before uploading. The checked-in zip carries a stale description without the clipboard declaration.
+  - Adding a shell version always sends the upload to a human reviewer, and any `.js` change does too. Ship the metadata bump and every pending code change in one upload, and never upload again before it is reviewed: a second upload with the same shell-version set auto-rejects the first.
+- [ ] Replace the `GLib.unix_signal_add` and `Gio.UnixInputStream` aliases in `service.js` with `GLibUnix.signal_add` and `GioUnix.InputStream` behind `GLib.check_version(2, 80, 0) === null`, keeping the aliases for 45.
+  - Load them with `imports.gi`, never `await import()`. A top-level await makes the service hang on stdin EOF and crash on SIGTERM.
+  - The aliases print three stack-traced warnings on every service start on GNOME 46 and later, which touches the "must not print excessively" review rule.
+- [ ] Add a row to the AGENTS.md "Review Guidelines" section naming the Shexli output the reviewer sees.
+  - Shexli is advisory and runs on every manually reviewed upload. Expected on this package: EGO-M-004 "implausible future releases" for `51` (extensions-web hardcodes a ceiling of 50, upstream issues #399 and #402) and EGO-P-007 that `service.js`, `service/` and `lib/` are unreachable from `extension.js`.
+  - Keep the `servicePath` identifier in the `Gio.Subprocess.new` argv. A template literal clears EGO-P-007 but adds four lifecycle and logging false positives, because a launched module is then judged as Shell-process code.
+  - Preview from a clone of extensions-web: `uv run --no-project --python 3.13 --with tree-sitter==0.25.2 --with tree-sitter-javascript==0.25.0 python -m shexli --format text <unzipped dir>`. tree-sitter 0.26 segfaults.
+- [ ] Optional: give the panel `St.BoxLayout` a `chronome-panel-box` class styled `spacing: 4px; > .system-status-icon { padding: 0; }`.
+  - `.panel-status-menu-box` has had no theme rule since 49, so on 49 to 51 the icon keeps its 6px padding and the panel item is a few pixels wider than on 45 to 48.
+- Manual checks on a 51 session: open the menu with Space or Return and confirm the first event row takes focus and Escape closes it, because `PopupMenuBase.open()` now emits `open-state-changed` before the actor is shown; confirm the service starts warning-free on gjs 1.90.
+
 ## Should Have
 
 - [ ] Pre-meeting notification with Join, Snooze and Dismiss actions.
@@ -25,18 +44,23 @@ Feature gaps against MeetingBar, Itsycal, Dato, Dot, nextmeeting and the other G
   - Three action buttons at most. On 45 they appear only in the banner.
   - Evaluate reminder times on a short tick, separate from the calendar refresh interval.
   - Key dedupe on UID, recurrence id and instance start. Weather events get a new UID on every refresh.
-  - Default off. `evolution-alarm-notify` already alerts for events that carry a VALARM, and GNOME 51 moves that into the Shell.
+  - Keep `disable()` synchronous. Shell 51 throws `disable() must not be async` on a thenable return and puts the extension in the ERROR state. Tear the source down with a plain `destroy()`.
+  - Default off. A `DISPLAY` VALARM is already shown by `evolution-alarm-notify` on 45 to 50 and by `gnome-shell-calendar-server` on 51, with Snooze and Dismiss. AUDIO and EMAIL alarms never reach the screen.
 - [ ] Several reminder offsets, and respect for the event's own VALARM.
   - Suppress the extension's alert only when the event has a `DISPLAY` alarm near the same time. `EMAIL` alarms never reach the screen.
   - Alarms need `ECal.Component`. Build it with `new_from_string(comp.as_ical_string())`, which copies.
   - Branch on the trigger kind first. A relative trigger's duration is negative, and an absolute trigger has none.
-  - Honour `ESourceAlarms:include-me` as "no reminders from this calendar".
+  - Convert trigger durations with `as_utc_seconds` and fall back to `as_int`. libical-glib 4 drops `as_int`, and `as_seconds` returns 0 for day and week durations.
+  - Honour `ESourceAlarms:include-me` as "no reminders from this calendar". The system reminder watcher filters on it and ignores `selected`.
+  - A calendar with `for-every-event` and `defall-reminder-enabled` is reminded for every event, VALARM or not. `for-every-event` needs EDS 3.52; guard the getter on 3.50.
+  - The system reminder can be switched off per app in Settings > Notifications: key `enable` under `/org/gnome/desktop/notifications/application/org-gnome-shell-calendarserver/` on 51, `org-gnome-evolution-alarm-notify` plus the EDS `notify-enable-display` key on 45 to 50. The 51 row exists only after the first reminder. Never infer from the Shell version alone.
 - [ ] Multi-day agenda: today plus tomorrow, or N days, with day headers and an option to hide empty days.
-  - `rescheduledFromToday` becomes a map from UID to a set of recurrence-id times. As a set of UIDs it would suppress every occurrence of the series in the window.
-  - Add a test with two rescheduled instances of one series in the same window.
+  - [x] `rescheduledFromToday` is a `Set` of `uid:recurrenceIdMs` keys from `getOccurrenceKey()`. As a set of UIDs it would suppress every occurrence of the series in the window.
+  - [x] Live fixture `Recur Four Slots`: two rescheduled instances of one series in the same window.
   - Issue one wide query and cache it. Every call pays a D-Bus round trip, and EDS caches nothing between calls.
   - Query the birthdays calendar on a slow path. Every entry is an endless yearly rule, so every contact matches any range and is expanded twice.
   - The cache key becomes the window bounds, not a date string.
+  - Classify "moved off the window" by overlap of `DTSTART`..`DTEND` with the window, not by `DTSTART` alone. An instance moved onto a slot that crosses midnight into the window is skipped today.
 - [ ] Global shortcuts to open the menu and to join the next meeting.
   - `Main.wm.addKeybinding` with `IGNORE_AUTOREPEAT` and `NORMAL | OVERVIEW | POPUP`. The schema key is type `as`.
   - Ship an empty default. Remove the binding in `disable()` and keep the same `Gio.Settings` instance for its lifetime.
@@ -111,7 +135,7 @@ Feature gaps against MeetingBar, Itsycal, Dato, Dot, nextmeeting and the other G
 ## Unverified
 
 - Whether Google applies an RSVP written through CalDAV.
-- Whether `evolution-alarm-notify` starts on EDS 3.58 and later, where its autostart entry is marked `X-systemd-skip`.
+- Whether `evolution-alarm-notify` runs under Shell 45 to 50 on a given distro. Its systemd user unit exists from EDS 3.57.3 but is disabled by preset on Fedora 44, and `X-systemd-skip` only covers the autostart entry. From EDS 3.61.3 the entry is `NotShowIn=GNOME` and `--autostart` exits under any GNOME desktop, so Shell 45 to 50 with EDS 3.62 may get no VALARM reminders at all, and Shell 51 with EDS 3.60 may get them twice.
 - How the fixes above behave on Google, Exchange and iCloud calendars. The live suite covers the local backend only.
 - The `STATUS` mapping on a real Microsoft 365 account, for accepted, tentative, declined and unanswered meetings. A meeting the organizer cancelled also shows as declined.
 - Whether `teams.cloud.microsoft` serves meeting links. The pattern accepts it with the same two paths as the other Teams hosts.
