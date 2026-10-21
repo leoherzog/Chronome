@@ -75,7 +75,9 @@ function loadChronomeSettings() {
 
 class ServiceUnderTest {
     async start() {
+        this.logPath = GLib.build_filenamev([GLib.getenv('CHRONOME_LIVE_TEST_DIR'), 'service.log']);
         const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.STDIN_PIPE});
+        launcher.set_stderr_file_path(this.logPath);
         this.process = launcher.spawnv(['gjs', '-m', repoDir.get_child('service.js').get_path()]);
 
         const Proxy = Gio.DBusProxy.makeProxyWrapper(DBUS_IFACE_XML);
@@ -96,6 +98,11 @@ class ServiceUnderTest {
             const payload = await this.payload();
             return predicate(payload) ? payload : null;
         });
+    }
+
+    log() {
+        const [, contents] = GLib.file_get_contents(this.logPath);
+        return new TextDecoder().decode(contents);
     }
 
     async stop() {
@@ -327,6 +334,7 @@ async function main() {
         const stopped = await service.stop();
         const nameReleased = await waitUntil('the bus name to be released',
             () => service.proxy.g_name_owner === null, 5000).then(() => true, () => false);
+        const serviceLog = service.log();
 
         describe('Live: service behaviour', () => {
             it('answers Ping and accepts Refresh on calendars that cannot refresh', () => {
@@ -347,10 +355,16 @@ async function main() {
                 expect(stopped).toBe('exit 0');
                 expect(nameReleased).toBe(true);
             });
+            it('logs no warnings or errors', () => {
+                expect(serviceLog).not.toMatch(/(WARNING|CRITICAL) \*\*/);
+            });
         });
     } finally {
         if (service.process?.get_identifier())
             service.process.force_exit();
+        // The service's stderr goes to its own file, so copy it into the session log run-tests.sh shows on failure.
+        if (service.process)
+            printerr(service.log());
         for (const {source} of calendars)
             await source.remove(null);
         // Same teardown trap as service.js: an undisposed registry crashes the interpreter's final collection.

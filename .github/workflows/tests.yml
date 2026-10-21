@@ -21,3 +21,17 @@ jobs:
 
       - name: Run tests
         run: ./run-tests.sh
+
+  test-gnome-51:
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:45
+
+    steps:
+      - name: Install gjs and Evolution Data Server
+        run: dnf -y install --setopt=install_weak_deps=False gjs evolution-data-server dbus-daemon glib2 tzdata git-core
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Run tests
+        run: ./run-tests.sh

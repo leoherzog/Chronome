@@ -58,7 +58,7 @@ Chronome/
 
 ### GNOME Shell Versions
 
-Supported versions (from `metadata.json`): **45, 46, 47, 48, 49, 50**
+Supported versions (from `metadata.json`): **45, 46, 47, 48, 49, 50, 51**
 
 ### GI Module Versions
 
@@ -79,7 +79,10 @@ The extension explicitly requires these versions:
 # Install extension locally for testing (packs only the files that ship)
 ./release.sh && gnome-extensions install --force chronome@herzog.tech.zip
 
-# Enable extension
+# The Shell loads a new or updated extension only at login, so log out and back in.
+# On X11 (GNOME 49 and earlier), Alt+F2, 'r', Enter restarts the Shell instead.
+
+# Enable extension (reports "does not exist" until the Shell has loaded it)
 gnome-extensions enable chronome@herzog.tech
 
 # Disable extension
@@ -87,9 +90,6 @@ gnome-extensions disable chronome@herzog.tech
 
 # View extension logs
 journalctl -f -o cat /usr/bin/gnome-shell
-
-# Restart GNOME Shell (X11 only - on Wayland, log out and back in)
-# Alt+F2 then type 'r' and press Enter
 ```
 
 ## Testing
@@ -125,7 +125,7 @@ Uses a custom minimal BDD-style test runner (`tests/runner.js`) that runs under 
 
 `run-tests.sh` runs `tests/live/runLive.js` once per zone in `LIVE_TIMEZONES`, one west and one east of Greenwich, so the local day and the UTC day disagree in both directions. Each run gets a private bus from `dbus-run-session` and its own `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` under a temp directory. The EDS factories are activated by that bus and inherit its environment, so they store the test calendars in the temp directory and exit with the bus. `GSETTINGS_BACKEND=keyfile` gives the suite and the service one shared settings store outside dconf. `runLive.js` refuses to start unless its data directory lies under `CHRONOME_LIVE_TEST_DIR`, so it cannot reach real calendars.
 
-The suite creates two local calendars through `EDataServer.SourceRegistry`, imports `fixtures.js` with `receive_objects`, spawns `service.js` the way `extension.js` does, and asserts on the `GetEvents` JSON. It then adds and removes an event, changes `enabled-calendars`, and sends SIGTERM, checking that the service follows each change and exits with status 0. At the end it removes both calendars, and `run-tests.sh` deletes the temp directory from an `EXIT` trap.
+The suite creates two local calendars through `EDataServer.SourceRegistry`, imports `fixtures.js` with `receive_objects`, spawns `service.js` the way `extension.js` does, and asserts on the `GetEvents` JSON. It then adds and removes an event, changes `enabled-calendars`, and sends SIGTERM, checking that the service follows each change and exits with status 0. The service's stderr goes to `service.log` under `CHRONOME_LIVE_TEST_DIR`, the suite fails on any warning or critical line in it, including the service's own `console.warn()` and `console.error()`, and the log is copied into the session log that `run-tests.sh` prints on failure. At the end it removes both calendars, and `run-tests.sh` deletes the temp directory from an `EXIT` trap.
 
 Fixtures are dated relative to the day of the run and looked up by their unique `SUMMARY`. The account address comes from an Authentication extension on the test source, which is what lets the RSVP fixtures match. Add a fixture and an assertion for every service-side behaviour that a pure `lib/` test cannot reach. Backend-specific behaviour (Microsoft 365, Google, Exchange) is out of reach, because only the local backend runs here.
 
@@ -184,7 +184,7 @@ Automatically attaches a release zip when a GitHub Release is published:
 
 ### Test Workflow (`.github/workflows/tests.yml`)
 
-Installs `gjs` from apt and runs `./run-tests.sh` on every push to `main` and every pull request. `tests/runner.js` exits non-zero on failure, so a red suite fails the job. The runner has no EDS, so the live suite is skipped there.
+Two jobs run `./run-tests.sh` on every push to `main` and every pull request. The `test` job installs `gjs` from apt on Ubuntu, has no EDS, and skips the live suite. The `test-gnome-51` job runs in a Fedora 45 container with gjs 1.90, GLib 2.90 and EDS 3.62, so the live suite runs there. `tests/runner.js` exits non-zero on failure, so a red suite fails the job.
 
 ## Architecture
 
@@ -238,7 +238,7 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 
 - **ui/indicator.js**: `ChronomeIndicator` class (PanelMenu.Button subclass), loaded only by the Shell process:
   - Panel label updates with countdown timers
-  - Dropdown menu with today's events (from pre-computed JSON), rebuilt on each update while closed and again on open, never while open, so an open menu is not destroyed under the pointer. An empty `PopupMenu` refuses to open, so the closed menu must stay built
+  - Dropdown menu with today's events (from pre-computed JSON), rebuilt on each update while closed and again on open, never while open, so an open menu is not destroyed under the pointer. An empty `PopupMenu` refuses to open, so the closed menu must stay built. Rebuild inside `open-state-changed`, never after the menu is shown: on Shell 51 a keyboard open moves focus to the first focusable row right after that signal.
   - Settings signal connections for display-only settings
 
 - **service.js**: D-Bus service entry point that handles:
@@ -284,7 +284,6 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 **ui/indicator.js:**
 - `OPACITY_DIMMED: 178` (~70%) - Opacity for past/declined events
 - `OPACITY_TENTATIVE: 204` (~80%) - Opacity for tentative events
-- `MENU_ICON_SIZE: 16` - Icon size in dropdown menu
 - `DBUS_CALL_TIMEOUT_MS: 5000` - Timeout for the `GetEvents` and `Refresh` calls
 
 ### Key Technical Details
@@ -300,11 +299,10 @@ The extension computes locally (needs fresh `Date.now()`): `isPast`, `isCurrent`
 
 ### Stylesheet (`stylesheet.css`)
 
-Custom CSS classes:
-- `.chronome-current-event` - Highlights ongoing events in the menu with subtle blue background
+The theme styles the panel item and the menu rows. `.popup-menu-item` gives the rows their padding, spacing and corner radius, and `.popup-menu-icon` sizes their icons. Chronome keeps three classes of its own:
+- `.chronome-panel-box` - Sits beside the Shell's `panel-status-indicators-box` on the panel box and sets `spacing: 0`, so the icon sits as close to the label as the Shell's battery icon sits to its percentage. The box must not use `panel-status-menu-box`, which has no theme rule from GNOME 49
+- `.chronome-current-event` - Tints the rows of ongoing events, more strongly on hover and keyboard focus and most while pressed. Extension rules outrank the theme's, so the row needs its own state rules to show any of them
 - `.chronome-color-bar` - Colored left border showing the source calendar's color
-- `.chronome-time-label` / `.chronome-time-label-wide` - Fixed-width time column in the menu (wide variant when end times are shown)
-- `.chronome-video-icon` - Spacing for the video conference link icon
 
 ## Utility Modules (`lib/`)
 
@@ -389,6 +387,7 @@ Loaded only by the GNOME Shell process. These may import `St`, `Clutter`, `Panel
 
 ### `indicator.js`
 - `ChronomeIndicator` - `PanelMenu.Button` subclass owning the panel label, icon, dropdown menu, the one-second countdown timer, and its own settings signal connections. All of it is torn down in `destroy()`.
+- Each event row is a `PopupBaseMenuItem` holding the color bar, time label, status icon, video icon and title as direct children, so the theme's row spacing applies. `_updateMenu()` then gives every time label the widest one's width. It calls `ensure_style()` first, because on Shell 51 the rebuild runs before the menu is shown and an unstyled label measures in the wrong font. The current row's accessible name includes "In progress".
 
 ## Service Modules (`service/`)
 
@@ -496,6 +495,9 @@ Chronome is submitted to extensions.gnome.org, so edits must stay inside the [re
 - Lines of 200 columns at most
 - A custom `destroy()` runs in this order: sources, signals, references, then `super.destroy()`
 - Clipboard access must be declared in the `metadata.json` description
+- `service.js` is a standalone GJS script, so its first line stays a GJS shebang
+- Every `run_dispose()` call carries a comment naming the real-world failure it prevents. Shexli reports the call in `prefs.js` as EGO-X-003, and the comment is the answer to it
+- Shexli, the advisory checker the reviewer sees, also reports EGO-A-005 for the clipboard write and EGO-P-007 for `service.js`, `service/` and the service-only `lib/` modules. Keep `servicePath` an identifier in the `Gio.Subprocess.new` argv. A template literal makes Shexli judge `service.js` as Shell-process code and adds false lifecycle and logging warnings
 
 ## Common Pitfalls for AI Agents
 
@@ -535,6 +537,10 @@ storedComps = (await client.get_object_list_as_comps(query, cancellable)).at(-1)
 
 Calls whose `*_finish` returns the value directly (`ECal.Client.connect`, `SourceRegistry.new`, `read_bytes_async`) are unaffected; so is `refresh` (no out-arg, return value unused).
 
+### Unix-Only APIs (service.js)
+
+gjs warns on `GLib.unix_signal_add` and `Gio.UnixInputStream` from GLib 2.80, so `service.js` takes `GLibUnix` and `GioUnix` from `imports.gi` behind `GLib.check_version(2, 80, 0)`. GLib 2.78 has neither namespace, so a static `gi://` import fails there, and a top-level `await import()` starves the main loop, as "GI Module Versions" explains for ICalGLib. GLibUnix names the signal function `signal_add_full` on GLib 2.80 to 2.86 and `signal_add` from 2.88, where gjs warns on the old name. The gjs warning on 2.80 to 2.86 recommends `GLibUnix.signal_add`, which is undefined there. The live suite fails if the service prints a `Gjs-WARNING`.
+
 ### Shared Property Iterator (service/eventProperties.js)
 
 A libical component has one property iterator, shared by every caller. `get_first_property()` / `get_next_property()` use it, and so does every component getter such as `get_summary()`, `get_dtstart()` or `get_recurrenceid()`. Calling any of them inside a property loop restarts the iterator, and the loop then skips properties or never ends.
@@ -570,13 +576,19 @@ Inside the loop in `wrapICalComponent()`, touch only `prop`. A property's parame
 
 Always disconnect signals during cleanup, collecting their ids in an array:
 - **ui/indicator.js**: In `destroy()` of `ChronomeIndicator`
-- **service.js**: In `_shutdown()`, for both `_settingsSignals` and `_registrySignals`. `_shutdown()` then calls `run_dispose()` on the source registry. Disposing it iterates the main context, and when that is left to the interpreter's final collection it dispatches a source whose JS callback is gone, so the process dies with SIGSEGV instead of exiting 0. Any gjs script that creates a `SourceRegistry` needs the same call before it exits.
+- **service.js**: In `_shutdown()`, for both `_settingsSignals` and `_registrySignals`
 
 ```javascript
 for (const id of this._settingsSignals) {
     this._settings.disconnect(id);
 }
 ```
+
+### SourceRegistry Disposal (service.js, prefs.js)
+
+Any gjs script that creates a `SourceRegistry` calls `run_dispose()` on it before it exits. Disposing it iterates the main context, and when that is left to the interpreter's final collection it dispatches a source whose JS callback is gone, so the process dies with SIGSEGV instead of exiting 0.
+- **service.js**: `_shutdown()` calls it after disconnecting `_registrySignals`.
+- **prefs.js**: `_buildCalendarsPage()` calls it as soon as it has listed the calendars and checked `enabled-calendars` against them, before it builds the rows. The preferences service exits shortly after its window closes, and a registry still alive then crashes it the same way.
 
 ### Cancellable for Async Operations (service.js)
 

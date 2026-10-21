@@ -19,22 +19,33 @@ Feature gaps against MeetingBar, Itsycal, Dato, Dot, nextmeeting and the other G
 
 ## GNOME 51
 
-Shell 51.0 pairs with mutter 51, gjs 1.90, GLib 2.90, GTK 4.24, libadwaita 1.10 and EDS 3.62. Nothing in the porting guide or in those releases removes an API this extension calls. Every claim below is read from tagged source; nothing has run on a 51 session yet.
+Shell 51.0 pairs with mutter 51, gjs 1.90, GLib 2.90, GTK 4.24, libadwaita 1.10 and EDS 3.62. Nothing in the porting guide or in those releases removes an API this extension calls. Unverified on a desktop 51 session until the manual checks below pass.
 
-- [ ] Add `"51"` to `shell-version` in `metadata.json`, and to the version lists in `AGENTS.md` and `README.md`.
+- [x] Add `"51"` to `shell-version` in `metadata.json`, and to the version lists in `AGENTS.md` and `README.md`.
   - Without it the Shell marks the extension out of date and never enables it.
-  - Rerun `release.sh` before uploading. The checked-in zip carries a stale description without the clipboard declaration.
+  - Rerun `release.sh` before uploading. The zip in the repo root is a gitignored local build and goes stale.
   - Adding a shell version always sends the upload to a human reviewer, and any `.js` change does too. Ship the metadata bump and every pending code change in one upload, and never upload again before it is reviewed: a second upload with the same shell-version set auto-rejects the first.
-- [ ] Replace the `GLib.unix_signal_add` and `Gio.UnixInputStream` aliases in `service.js` with `GLibUnix.signal_add` and `GioUnix.InputStream` behind `GLib.check_version(2, 80, 0) === null`, keeping the aliases for 45.
-  - Load them with `imports.gi`, never `await import()`. A top-level await makes the service hang on stdin EOF and crash on SIGTERM.
-  - The aliases print three stack-traced warnings on every service start on GNOME 46 and later, which touches the "must not print excessively" review rule.
-- [ ] Add a row to the AGENTS.md "Review Guidelines" section naming the Shexli output the reviewer sees.
-  - Shexli is advisory and runs on every manually reviewed upload. Expected on this package: EGO-M-004 "implausible future releases" for `51` (extensions-web hardcodes a ceiling of 50, upstream issues #399 and #402) and EGO-P-007 that `service.js`, `service/` and `lib/` are unreachable from `extension.js`.
-  - Keep the `servicePath` identifier in the `Gio.Subprocess.new` argv. A template literal clears EGO-P-007 but adds four lifecycle and logging false positives, because a launched module is then judged as Shell-process code.
-  - Preview from a clone of extensions-web: `uv run --no-project --python 3.13 --with tree-sitter==0.25.2 --with tree-sitter-javascript==0.25.0 python -m shexli --format text <unzipped dir>`. tree-sitter 0.26 segfaults.
-- [ ] Optional: give the panel `St.BoxLayout` a `chronome-panel-box` class styled `spacing: 4px; > .system-status-icon { padding: 0; }`.
-  - `.panel-status-menu-box` has had no theme rule since 49, so on 49 to 51 the icon keeps its 6px padding and the panel item is a few pixels wider than on 45 to 48.
-- Manual checks on a 51 session: open the menu with Space or Return and confirm the first event row takes focus and Escape closes it, because `PopupMenuBase.open()` now emits `open-state-changed` before the actor is shown; confirm the service starts warning-free on gjs 1.90.
+- [x] Replace the `GLib.unix_signal_add` and `Gio.UnixInputStream` aliases in `service.js`, which print stack-traced warnings on every service start from GNOME 46. GLib 2.78 keeps the aliases.
+  - Load `GLibUnix` and `GioUnix` with `imports.gi` behind `GLib.check_version(2, 80, 0)`, never `await import()`. A top-level await starves the main loop.
+  - GLibUnix names the function `signal_add_full` on GLib 2.80 to 2.86 and `signal_add` from 2.88. The gjs warning on 2.80 to 2.86 recommends `signal_add` anyway.
+- [x] Add a row to the AGENTS.md "Review Guidelines" section naming the Shexli output the reviewer sees.
+  - Shexli is advisory and runs on every manually reviewed upload. Expected on this package: EGO-A-005 for the clipboard write, EGO-P-007 that `service.js`, `service/` and the `lib/` modules only the service loads are unreachable from `extension.js`, and EGO-X-003 for the `run_dispose()` call in `prefs.js`.
+  - The copy the site runs accepts `51`, because its EGO-M-004 ceiling follows the six-month release cadence. The PyPI `shexli` 0.2.1 that the upload page recommends predates that and reports EGO-M-004 for `51`.
+  - Keep the `servicePath` identifier in the `Gio.Subprocess.new` argv. A template literal clears EGO-P-007 but adds EGO-L-001, L-003, L-004 and A-004, and a second EGO-X-003 location, because a launched module is then judged as Shell-process code.
+  - Preview from the `shexli/` directory of an extensions-web clone: `uv run --no-project --python 3.14 --with tree-sitter==0.25.2 --with tree-sitter-javascript==0.25.0 python -m shexli --format text <path to chronome@herzog.tech.zip>`. Shexli needs Python 3.14, and tree-sitter 0.26 segfaults.
+- [x] Dispose the `SourceRegistry` in `prefs.js` once the Calendars page has listed the calendars. The preferences service exits shortly after its window closes, and a registry still alive then crashes it with SIGSEGV on every Shell version.
+- [x] Build the panel box like the Shell's battery indicator: `panel-status-indicators-box` plus `chronome-panel-box`, whose only rule is `spacing: 0`.
+  - `.panel-status-menu-box` has no theme rule from 49, which leaves the icon its standalone `0 6px` padding. The theme supplies everything else, and the icon-to-label gap equals the battery's: 5px on 45, 4px on 46 to 51.
+- [x] Restate the hover, focus and pressed highlights on `.chronome-current-event`. Extension rules outrank the theme's, so without state rules the current row shows no change in any of them. 51 focuses the first row when the menu opens from the keyboard.
+- [x] Let the theme lay out the menu rows. Each event row is a `PopupBaseMenuItem` with its children added directly, so `.popup-menu-item` supplies the spacing and 12px corners and `.popup-menu-icon` sizes the icons, which follow the text scale from 46 on.
+  - The time column takes the widest time label's width when the menu is built. A fixed min-width cannot hold 12-hour times in every font or follow the text scale. Call `ensure_style()` before measuring: on 51 the rebuild runs before the menu is shown.
+  - The status icon sits after the time, and the current row has no ornament. Either one at the row start shifts that row's time column by an icon and a gap.
+  - A past tentative event is dimmed like any other past event.
+- Manual checks on a desktop 51 session:
+  - In the light and dark styles, the panel icon-to-label gap equals the gap between the battery icon and its percentage.
+  - In the light and dark styles, the current row's tint at rest, on hover, on keyboard focus, while pressed, and after the pointer leaves a hovered row.
+  - One time column across all rows, with 12-hour and 24-hour times at 100% and 125% text scaling.
+  - No new `gjs` entry in `coredumpctl list` after the preferences window closes.
 
 ## Should Have
 
@@ -45,9 +56,9 @@ Shell 51.0 pairs with mutter 51, gjs 1.90, GLib 2.90, GTK 4.24, libadwaita 1.10 
   - Evaluate reminder times on a short tick, separate from the calendar refresh interval.
   - Key dedupe on UID, recurrence id and instance start. Weather events get a new UID on every refresh.
   - Keep `disable()` synchronous. Shell 51 throws `disable() must not be async` on a thenable return and puts the extension in the ERROR state. Tear the source down with a plain `destroy()`.
-  - Default off. A `DISPLAY` VALARM is already shown by `evolution-alarm-notify` on 45 to 50 and by `gnome-shell-calendar-server` on 51, with Snooze and Dismiss. AUDIO and EMAIL alarms never reach the screen.
+  - Default off. A `DISPLAY` VALARM is already shown by `evolution-alarm-notify` on 45 to 50 and by `gnome-shell-calendar-server` on 51, with Snooze and Dismiss. `evolution-alarm-notify` also shows AUDIO alarms; the 51 calendar server ignores them. EMAIL alarms never reach the screen.
 - [ ] Several reminder offsets, and respect for the event's own VALARM.
-  - Suppress the extension's alert only when the event has a `DISPLAY` alarm near the same time. `EMAIL` alarms never reach the screen.
+  - Suppress the extension's alert only when the event has a `DISPLAY` alarm near the same time, or an `AUDIO` alarm on 45 to 50. `EMAIL` alarms never reach the screen.
   - Alarms need `ECal.Component`. Build it with `new_from_string(comp.as_ical_string())`, which copies.
   - Branch on the trigger kind first. A relative trigger's duration is negative, and an absolute trigger has none.
   - Convert trigger durations with `as_utc_seconds` and fall back to `as_int`. libical-glib 4 drops `as_int`, and `as_seconds` returns 0 for day and week durations.
@@ -135,7 +146,7 @@ Shell 51.0 pairs with mutter 51, gjs 1.90, GLib 2.90, GTK 4.24, libadwaita 1.10 
 ## Unverified
 
 - Whether Google applies an RSVP written through CalDAV.
-- Whether `evolution-alarm-notify` runs under Shell 45 to 50 on a given distro. Its systemd user unit exists from EDS 3.57.3 but is disabled by preset on Fedora 44, and `X-systemd-skip` only covers the autostart entry. From EDS 3.61.3 the entry is `NotShowIn=GNOME` and `--autostart` exits under any GNOME desktop, so Shell 45 to 50 with EDS 3.62 may get no VALARM reminders at all, and Shell 51 with EDS 3.60 may get them twice.
+- Whether `evolution-alarm-notify` runs under Shell 45 to 50 on a given distro. Its systemd user unit exists from EDS 3.57.3 but is disabled by preset on Fedora 44, and `X-systemd-skip` only covers the autostart entry. From EDS 3.61.3 the autostart entry is `NotShowIn=GNOME`. In 3.62 both the entry and the unit pass `--autostart`, which exits when `XDG_CURRENT_DESKTOP` contains GNOME, `gnome-notifications-panel.desktop` is installed and the process is not a Flatpak. Shell 45 to 50 with EDS 3.62 may therefore get no VALARM reminders at all. Shell 51's calendar server shows reminders whatever the EDS version. Ubuntu 26.10 pairs it with EDS 3.56 and the old autostart entry, so each reminder probably shows twice there.
 - How the fixes above behave on Google, Exchange and iCloud calendars. The live suite covers the local backend only.
 - The `STATUS` mapping on a real Microsoft 365 account, for accepted, tentative, declined and unanswered meetings. A meeting the organizer cancelled also shows as declined.
 - Whether `teams.cloud.microsoft` serves meeting links. The pattern accepts it with the same two paths as the other Teams hosts.

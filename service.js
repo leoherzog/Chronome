@@ -28,6 +28,19 @@ Gio._promisify(ECal.Client.prototype, 'get_view', 'get_view_finish');
 Gio._promisify(EDataServer.SourceRegistry, 'new', 'new_finish');
 Gio._promisify(Gio.InputStream.prototype, 'read_bytes_async', 'read_bytes_finish');
 
+// gjs warns on GLib.unix_signal_add and Gio.UnixInputStream from GLib 2.80, where they moved to GLibUnix and GioUnix,
+// and GLibUnix names the signal function signal_add_full before GLib 2.88. GNOME 45 has neither namespace, and a
+// top-level await would starve the main loop, so they load through imports.gi.
+let unixSignalAdd, UnixInputStream;
+if (GLib.check_version(2, 80, 0) !== null) {
+    unixSignalAdd = GLib.unix_signal_add;
+    UnixInputStream = Gio.UnixInputStream;
+} else {
+    const {GLibUnix, GioUnix} = imports.gi;
+    unixSignalAdd = GLib.check_version(2, 88, 0) === null ? GLibUnix.signal_add : GLibUnix.signal_add_full;
+    UnixInputStream = GioUnix.InputStream;
+}
+
 const CONSTANTS = {
     DEBOUNCE_MS: 500,
     CLIENT_CONNECT_TIMEOUT_SEC: 10,
@@ -138,16 +151,14 @@ class ChronomeService {
             this._shutdown();
             return GLib.SOURCE_REMOVE;
         };
-        // GLibUnix.signal_add and GioUnix.InputStream (see _watchParent) need GLib 2.80, so the
-        // deprecated aliases stay while metadata.json still claims GNOME 45.
-        this._sigtermSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15 /* SIGTERM */, onSignal);
-        this._sigintSourceId = GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 2 /* SIGINT */, onSignal);
+        this._sigtermSourceId = unixSignalAdd(GLib.PRIORITY_DEFAULT, 15 /* SIGTERM */, onSignal);
+        this._sigintSourceId = unixSignalAdd(GLib.PRIORITY_DEFAULT, 2 /* SIGINT */, onSignal);
 
         this._loop.run();
     }
 
     _watchParent() {
-        this._stdinStream ??= Gio.UnixInputStream.new(0, false);
+        this._stdinStream ??= UnixInputStream.new(0, false);
         this._stdinStream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, this._cancellable)
             .then(bytes => {
                 if (this._cancellable.is_cancelled()) return;

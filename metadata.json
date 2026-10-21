@@ -3,7 +3,7 @@
   "description": "Show upcoming meetings on your calendar\n\nThis extension writes to the clipboard when the When Clicking a Link setting is set to Copy to Clipboard and an event is clicked.",
   "uuid": "chronome@herzog.tech",
   "version-name": "1.2.1",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
   "url": "https://github.com/leoherzog/chronome",
   "settings-schema": "org.gnome.shell.extensions.chronome",
   "gettext-domain": "chronome",

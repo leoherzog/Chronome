@@ -17,7 +17,6 @@ import {getCurrentMeetings, sortEventsByStartTime} from '../lib/eventUtils.js';
 const CONSTANTS = {
     OPACITY_DIMMED: 178,
     OPACITY_TENTATIVE: 204,
-    MENU_ICON_SIZE: 16,
     DBUS_CALL_TIMEOUT_MS: 5000,
 };
 
@@ -31,7 +30,8 @@ export const ChronomeIndicator = GObject.registerClass({
         this._proxy = proxy;
         this._cancellable = new Gio.Cancellable();
 
-        const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
+        // The Shell's battery indicator uses this box class for its icon and percentage; panel-status-menu-box has no theme rule from 49.
+        const box = new St.BoxLayout({style_class: 'panel-status-indicators-box chronome-panel-box'});
 
         this._icon = new St.Icon({
             icon_name: 'x-office-calendar-symbolic',
@@ -308,49 +308,40 @@ export const ChronomeIndicator = GObject.registerClass({
             return;
         }
 
+        const timeLabels = [];
         for (const data of visibleEvents) {
             const {startMs, endMs, isPast, isDeclined, isTentative,
                    isNeedsResponse, timeRange, title, videoLink, calendarColor} = data;
+            const isCurrent = startMs <= now && endMs > now;
 
             const [statusIcon, statusText] = isDeclined ? ['radio-mixed-symbolic', _('Declined')]
                 : isTentative ? ['radio-checked-symbolic', _('Tentative')]
                 : isNeedsResponse ? ['radio-symbolic', _('Needs response')]
                 : [null, null];
 
-            const menuItem = statusIcon
-                ? new PopupMenu.PopupImageMenuItem('', statusIcon)
-                : new PopupMenu.PopupMenuItem('');
-
-            const labelBox = new St.BoxLayout({x_expand: true});
+            // Children go straight into the item, so the theme's row spacing separates them.
+            const menuItem = new PopupMenu.PopupBaseMenuItem();
 
             if (useColors && calendarColor) {
-                const colorBar = new St.Widget({
+                menuItem.add_child(new St.Widget({
                     style_class: 'chronome-color-bar',
                     style: `background-color: ${calendarColor};`,
                     y_expand: true,
-                });
-                labelBox.add_child(colorBar);
+                }));
             }
 
-            const timeLabelClass = showEndTime
-                ? 'chronome-time-label chronome-time-label-wide'
-                : 'chronome-time-label';
             const timeLabel = new St.Label({
                 text: timeRange,
                 y_align: Clutter.ActorAlign.CENTER,
-                style_class: timeLabelClass,
             });
-            labelBox.add_child(timeLabel);
+            timeLabels.push(timeLabel);
+            menuItem.add_child(timeLabel);
 
-            if (videoLink) {
-                const videoIcon = new St.Icon({
-                    icon_name: 'camera-video-symbolic',
-                    style_class: 'popup-menu-icon chronome-video-icon',
-                    icon_size: CONSTANTS.MENU_ICON_SIZE,
-                    y_align: Clutter.ActorAlign.CENTER,
-                });
-                labelBox.add_child(videoIcon);
-            }
+            if (statusIcon)
+                menuItem.add_child(new St.Icon({icon_name: statusIcon, style_class: 'popup-menu-icon'}));
+
+            if (videoLink)
+                menuItem.add_child(new St.Icon({icon_name: 'camera-video-symbolic', style_class: 'popup-menu-icon'}));
 
             const titleLabel = new St.Label({
                 y_align: Clutter.ActorAlign.CENTER,
@@ -362,13 +353,11 @@ export const ChronomeIndicator = GObject.registerClass({
             } else {
                 titleLabel.set_text(title);
             }
-            labelBox.add_child(titleLabel);
+            menuItem.add_child(titleLabel);
 
-            menuItem.label.hide();
-            menuItem.add_child(labelBox);
-
-            // The hidden built-in label leaves the row with no accessible name of its own.
-            menuItem.accessible_name = [timeRange, title, statusText, videoLink ? _('Video call') : null]
+            // A PopupBaseMenuItem has no label, so the row needs an accessible name of its own.
+            menuItem.accessible_name = [timeRange, title, isCurrent ? _('In progress') : null, statusText,
+                videoLink ? _('Video call') : null]
                 .filter(s => s)
                 .join(', ');
 
@@ -389,20 +378,26 @@ export const ChronomeIndicator = GObject.registerClass({
                 menuItem.track_hover = false;
             }
 
-            if (isPast) {
-                menuItem.set_opacity(CONSTANTS.OPACITY_DIMMED);
-            } else if (startMs <= now && endMs > now) {
+            if (isCurrent)
                 menuItem.add_style_class_name('chronome-current-event');
-                menuItem.setOrnament(PopupMenu.Ornament.DOT);
-            }
 
-            if (isDeclined)
+            if (isPast || isDeclined)
                 menuItem.set_opacity(CONSTANTS.OPACITY_DIMMED);
-            if (isTentative)
+            else if (isTentative)
                 menuItem.set_opacity(CONSTANTS.OPACITY_TENTATIVE);
 
             this.menu.addMenuItem(menuItem);
         }
+
+        // Every time label takes the widest one's width, so the column holds for any font, time format and text scale.
+        // A label gets its font when styled, and on Shell 51 this runs before the menu is shown, so style it first.
+        const timeWidth = Math.max(...timeLabels.map(label => {
+            label.ensure_style();
+            return label.get_preferred_width(-1)[1];
+        }));
+        // Set width, not min_width: a minimum above a label's natural width aborts the Shell in ClutterBoxLayout.
+        for (const label of timeLabels)
+            label.width = timeWidth;
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         const refreshItem = new PopupMenu.PopupMenuItem(_('Refresh'));

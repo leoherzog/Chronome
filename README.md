@@ -30,16 +30,17 @@ cd Chronome
 
 # Install it (--force replaces any previous install)
 gnome-extensions install --force chronome@herzog.tech.zip
+```
 
-# Enable the extension
+Log out and back in so GNOME Shell loads the extension, then enable it. Until then `enable` reports that the extension does not exist. On an X11 session, available only on GNOME 49 and earlier, Alt+F2 → `r` → Enter restarts the Shell instead of logging out.
+
+```bash
 gnome-extensions enable chronome@herzog.tech
 ```
 
-On X11, restart GNOME Shell with Alt+F2 → `r` → Enter. On Wayland, log out and back in.
-
 ## Requirements
 
-- GNOME Shell 45, 46, 47, 48, 49, or 50
+- GNOME Shell 45, 46, 47, 48, 49, 50, or 51
 - Evolution Data Server (typically pre-installed on GNOME desktops)
 - GNOME Online Accounts (optional, for cloud calendar sync)
 

@@ -201,17 +201,15 @@ export default class ChronomePreferences extends ExtensionPreferences {
         page.add(calendarsGroup);
 
         EDataServer.SourceRegistry.new(null, (obj, res) => {
-            // Check if prefs window was closed before callback fired
-            if (!calendarsGroup.get_parent()) {
-                return;
-            }
-
-            calendarsGroup.remove(loadingRow);
-
             let registry;
             try {
                 registry = EDataServer.SourceRegistry.new_finish(res);
             } catch (e) {
+                // Check if prefs window was closed before callback fired
+                if (!calendarsGroup.get_parent()) {
+                    return;
+                }
+                calendarsGroup.remove(loadingRow);
                 const errorRow = new Adw.ActionRow({
                     title: _('Could not load calendars'),
                     subtitle: e.message,
@@ -228,6 +226,20 @@ export default class ChronomePreferences extends ExtensionPreferences {
 
             const dedupedSources = deduplicateSources(enabledSources, registry);
 
+            // Re-adding an account yields new source UIDs; stale ones filter every event out.
+            const known = enabledCalendars.filter(uid => registry.ref_source(uid) !== null);
+
+            // The preferences service exits shortly after this window closes, and a registry still alive at that
+            // point makes it die with SIGSEGV. Dispose it even when the window has closed already.
+            registry.run_dispose();
+
+            // Check if prefs window was closed before callback fired
+            if (!calendarsGroup.get_parent()) {
+                return;
+            }
+
+            calendarsGroup.remove(loadingRow);
+
             const sortedSources = dedupedSources.sort((a, b) =>
                 a.get_display_name().localeCompare(b.get_display_name()));
 
@@ -240,8 +252,6 @@ export default class ChronomePreferences extends ExtensionPreferences {
                 return;
             }
 
-            // Re-adding an account yields new source UIDs; stale ones filter every event out.
-            const known = enabledCalendars.filter(uid => registry.ref_source(uid) !== null);
             if (known.length !== enabledCalendars.length) {
                 settings.set_strv('enabled-calendars', known);
             }

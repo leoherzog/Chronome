@@ -1,22 +1,25 @@
 .chronome-current-event {
     background-color: rgba(74, 144, 217, 0.1);
-    border-radius: 5px;
+}
+
+/* Extension rules outrank the theme's, so the current row restates the theme's highlight and pressed shade.
+   Shell 45 and 46 mark the highlighted row with the selected class, 47 and later with :selected. The rule leaves out :focus, which stays after the pointer leaves. */
+.chronome-current-event:hover,
+.chronome-current-event:selected,
+.chronome-current-event.selected {
+    background-color: rgba(74, 144, 217, 0.25);
+}
+
+/* Stays after the highlight rule, which has the same specificity, so a pressed row takes this tint. */
+.chronome-current-event:active {
+    background-color: rgba(74, 144, 217, 0.35);
 }
 
 .chronome-color-bar {
     width: 3px;
-    margin-right: 8px;
 }
 
-.chronome-time-label {
-    min-width: 48px;
-    margin-right: 8px;
-}
-
-.chronome-time-label-wide {
-    min-width: 128px;
-}
-
-.chronome-video-icon {
-    margin-right: 6px;
+/* Matches the Shell's battery icon and percentage, whose box the theme's .power-status rule sets to spacing 0. */
+.chronome-panel-box {
+    spacing: 0;
 }
