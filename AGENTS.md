@@ -184,7 +184,7 @@ Automatically attaches a release zip when a GitHub Release is published:
 
 ### Test Workflow (`.github/workflows/tests.yml`)
 
-Two jobs run `./run-tests.sh` on every push to `main` and every pull request. The `test` job installs `gjs` from apt on Ubuntu, has no EDS, and skips the live suite. The `test-gnome-51` job runs in a Fedora 45 container with gjs 1.90, GLib 2.90 and EDS 3.62, so the live suite runs there. `tests/runner.js` exits non-zero on failure, so a red suite fails the job.
+Runs `./run-tests.sh`, live suite included, on every push to `main` and every pull request. A matrix job covers the oldest and newest Shell in `metadata.json` in Fedora containers: Fedora 39 for GNOME 45 and Fedora 45 for GNOME 51. Fedora 39 is end-of-life, so its job first points dnf at `archives.fedoraproject.org`. When `metadata.json` gains or drops a Shell version, move the matching end of the matrix. `tests/runner.js` exits non-zero on failure, so a red suite fails the job.
 
 ## Architecture
 
